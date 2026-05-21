@@ -5,3 +5,5 @@ matplotlib
 numpy
 jupyter
 scikit-learn
+pytorch-lightning
+wandb
