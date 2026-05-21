@@ -2,3 +2,6 @@ torch
 monai
 nibabel
 matplotlib
+numpy
+jupyter
+scikit-learn
