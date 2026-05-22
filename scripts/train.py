@@ -3,6 +3,7 @@ Main training script using PyTorch Lightning and Weights & Biases.
 """
 
 import os
+import warnings
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
@@ -10,9 +11,14 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from torch.optim import AdamW
 from monai.losses import DiceCELoss
 
+# Ignore MONAI's FutureWarning
+warnings.filterwarnings("ignore", category=FutureWarning)
+
 import sys
 from pathlib import Path
-sys.path.append(str(Path(__file__).resolve().parents[1]))
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.append(str(PROJECT_ROOT))
 
 from src.data.transforms import get_train_transforms, get_val_transforms
 from src.data.dataset import get_train_val_dataloaders
@@ -21,7 +27,7 @@ from src.training.lightning_module import OrganMapperModule
 
 def main():
     # --- 1. Configuration ---
-    data_dir = Path("../data/raw") # Relative to the script execution path
+    data_dir = PROJECT_ROOT / "data" / "raw"
     spatial_size = (96, 96, 96)
     batch_size = 2
     learning_rate = 1e-4
@@ -34,6 +40,7 @@ def main():
         train_transforms=get_train_transforms(spatial_size=spatial_size),
         val_transforms=get_val_transforms(),
         batch_size=batch_size,
+        cache_rate=0.0, # No caching for now
         num_workers=0 # Keep at 0 for Windows
     )
 
@@ -72,11 +79,16 @@ def main():
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices=1,
         precision="16-mixed", # AMP: Automatic Mixed Precision
-        log_every_n_steps=2
+        log_every_n_steps=5
     )
     
     # Start the training loop
-    trainer.fit(model=pl_module, train_dataloaders=train_loader, val_dataloaders=val_loader)
+    trainer.fit(
+        model=pl_module,
+        train_dataloaders=train_loader,
+        val_dataloaders=val_loader,
+        ckpt_path="checkpoints/unet-best-epoch=07-val/loss=2.18.ckpt"
+        )
 
 if __name__ == "__main__":
     main()

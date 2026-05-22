@@ -1,9 +1,19 @@
-torch
+# 1. PyTorch with NVIDIA GPU support (Here CUDA 12.1)
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch>=2.0.0
+torchvision>=0.15.0
+
+# 2. Medical Framework
 monai
 nibabel
-matplotlib
-numpy
-jupyter
-scikit-learn
+
+# 3. MLOps & Training
 pytorch-lightning
 wandb
+
+# 4. Utilitaires & Data Science
+matplotlib
+numpy
+pandas
+jupyter
+scikit-learn

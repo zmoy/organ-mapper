@@ -6,6 +6,8 @@ Encapsulates the model, loss, optimizer, and training/validation steps.
 import torch
 import pytorch_lightning as pl
 from monai.inferers import sliding_window_inference
+from monai.metrics import DiceMetric
+from monai.transforms import AsDiscrete
 
 class OrganMapperModule(pl.LightningModule):
     def __init__(
@@ -14,7 +16,8 @@ class OrganMapperModule(pl.LightningModule):
         loss_function: torch.nn.Module, 
         optimizer_class: type,
         optimizer_kwargs: dict,
-        val_roi_size: tuple[int, int, int] = (96, 96, 96)
+        val_roi_size: tuple[int, int, int] = (96, 96, 96),
+        num_classes: int = 14
     ):
         super().__init__()
         self.model = model
@@ -23,8 +26,15 @@ class OrganMapperModule(pl.LightningModule):
         self.optimizer_kwargs = optimizer_kwargs
         self.val_roi_size = val_roi_size
         
-        # Save hyperparameters to W&B automatically
+        # Save hyperparameters to W&B
         self.save_hyperparameters(ignore=['model', 'loss_function'])
+
+        # --- NEW: Dice Score Metric ---
+        self.dice_metric = DiceMetric(include_background=False, reduction="mean")
+        
+        # Post-processing to convert raw predictions into discrete one-hot formats
+        self.post_pred = AsDiscrete(argmax=True, to_onehot=num_classes)
+        self.post_label = AsDiscrete(to_onehot=num_classes)
 
     def forward(self, x):
         return self.model(x)
@@ -35,29 +45,45 @@ class OrganMapperModule(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         images, labels = batch["image"], batch["label"]
-        
-        # Forward pass
         outputs = self.forward(images)
         loss = self.loss_function(outputs, labels)
         
-        # Log training loss to W&B
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
         images, labels = batch["image"], batch["label"]
         
-        # Sliding window inference for validation (uses full volume)
-        sw_batch_size = 4 # Number of patches to process simultaneously
+        # 1. GPU Inference
         outputs = sliding_window_inference(
             inputs=images, 
             roi_size=self.val_roi_size, 
-            sw_batch_size=sw_batch_size, 
+            sw_batch_size=1, 
             predictor=self.model
         )
         
-        loss = self.loss_function(outputs, labels)
+        # 2. CPU Offloading (FIX OOM 4GB VRAM)
+        # We move these massive full-volume tensors back to system RAM!
+        outputs = outputs.cpu()
+        labels = labels.cpu()
         
-        # Log validation loss to W&B
+        # Calculate loss on CPU
+        loss = self.loss_function(outputs, labels)
         self.log("val/loss", loss, on_epoch=True, prog_bar=True, logger=True)
+        
+        # 3. Calculate Dice Score
+        # Apply post-processing (list of tensors required by MONAI metrics)
+        val_outputs = [self.post_pred(i) for i in outputs]
+        val_labels = [self.post_label(i) for i in labels]
+        
+        self.dice_metric(y_pred=val_outputs, y=val_labels)
+        
         return loss
+
+    def on_validation_epoch_end(self):
+        # Calculate mean Dice score over the whole validation set
+        mean_dice = self.dice_metric.aggregate().item()
+        self.dice_metric.reset()
+        
+        # Log to Weights & Biases
+        self.log("val/dice", mean_dice, prog_bar=True, logger=True)
