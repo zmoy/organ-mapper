@@ -40,7 +40,7 @@ def get_model(
     elif model_name == "swin_unetr":
         # Swin UNETR (State-of-the-Art Transformer)
         model = SwinUNETR(
-            img_size=spatial_size,
+            spatial_dims=3,
             in_channels=in_channels,
             out_channels=out_channels,
             feature_size=48,

@@ -61,7 +61,7 @@ def get_train_transforms(
             spatial_size=spatial_size,
             pos=1,  # Weight for positive samples (center is an organ)
             neg=1,  # Weight for negative samples (center is background)
-            num_samples=4, # How many patches to extract per volume loaded
+            num_samples=1, # How many patches to extract per volume loaded
             image_key="image",
             image_threshold=0,
         ),
@@ -83,40 +83,75 @@ def get_train_transforms(
     
     return transforms
 
-def get_val_transforms(
-    spacing: tuple[float, float, float] = (1.5, 1.5, 2.0)
-) -> Compose:
-    """
-    Builds the MONAI transform pipeline for validation and inference.
-    It standardizes the geometry and intensity, but keeps the full volume intact.
+# def get_val_transforms(
+#     spacing: tuple[float, float, float] = (1.5, 1.5, 2.0)
+# ) -> Compose:
+#     """
+#     Builds the MONAI transform pipeline for validation and inference.
+#     It standardizes the geometry and intensity, but keeps the full volume intact.
     
-    Args:
-        spacing: The target physical resolution in mm (X, Y, Z).
+#     Args:
+#         spacing: The target physical resolution in mm (X, Y, Z).
         
-    Returns:
-        Compose: The composed MONAI transforms pipeline.
-    """
+#     Returns:
+#         Compose: The composed MONAI transforms pipeline.
+#     """
+    
+#     transforms = Compose([
+#         # --- 1. Load and Standardize ---
+#         LoadImaged(keys=["image", "label"]),
+#         EnsureChannelFirstd(keys=["image", "label"]),
+#         Orientationd(keys=["image", "label"], axcodes="RAS"),
+        
+#         # Resample physical spacing (Must match training spacing exactly)
+#         Spacingd(
+#             keys=["image", "label"], 
+#             pixdim=spacing, 
+#             mode=("bilinear", "nearest")
+#         ),
+        
+#         # --- 2. Intensity Normalization ---
+#         # Soft tissue windowing (Must match training windowing exactly)
+#         ScaleIntensityRanged(
+#             keys=["image"],
+#             a_min=-175.0, a_max=250.0,
+#             b_min=0.0, b_max=1.0,
+#             clip=True
+#         )
+#     ])
+    
+#     return transforms
+
+def get_val_transforms(
+    spacing: tuple[float, float, float] = (1.5, 1.5, 2.0),
+    spatial_size: tuple[int, int, int] = (96, 96, 96) # Ajout de spatial_size
+) -> Compose:
     
     transforms = Compose([
-        # --- 1. Load and Standardize ---
         LoadImaged(keys=["image", "label"]),
         EnsureChannelFirstd(keys=["image", "label"]),
         Orientationd(keys=["image", "label"], axcodes="RAS"),
-        
-        # Resample physical spacing (Must match training spacing exactly)
         Spacingd(
             keys=["image", "label"], 
             pixdim=spacing, 
             mode=("bilinear", "nearest")
         ),
-        
-        # --- 2. Intensity Normalization ---
-        # Soft tissue windowing (Must match training windowing exactly)
         ScaleIntensityRanged(
             keys=["image"],
             a_min=-175.0, a_max=250.0,
             b_min=0.0, b_max=1.0,
             clip=True
+        ),
+        # --- NOUVEAU : On extrait un seul patch de validation au lieu de l'image entière ---
+        RandCropByPosNegLabeld(
+            keys=["image", "label"],
+            label_key="label",
+            spatial_size=spatial_size,
+            pos=1,
+            neg=1,
+            num_samples=1, # 1 seul patch
+            image_key="image",
+            image_threshold=0,
         )
     ])
     

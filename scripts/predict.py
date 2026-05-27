@@ -28,7 +28,11 @@ def main():
     output_dir = PROJECT_ROOT / "predictions"
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    checkpoint_path = PROJECT_ROOT / "checkpoints" / "unet_baseline_best" / "unet_baseline.ckpt" 
+    # Baseline UNet
+    # checkpoint_path = PROJECT_ROOT / "checkpoints" / "unet_baseline_best" / "unet_baseline.ckpt" 
+    
+    # Swin Transformer
+    checkpoint_path = PROJECT_ROOT / "checkpoints" / "swin_trained_best" / "swin_trained.ckpt"
     
     spatial_size = (96, 96, 96)
     
@@ -37,8 +41,13 @@ def main():
 
     # --- 2. Chargement du Modèle ---
     print(f"Loading checkpoint from: {checkpoint_path}")
-    model = get_model(model_name="unet", spatial_size=spatial_size)
     
+    # Unet Model
+    # model = get_model(model_name="unet", spatial_size=spatial_size)
+    
+    # Swin UNETR Model
+    model = get_model(model_name="swin_unetr", spatial_size=spatial_size)
+
     pl_module = OrganMapperModule.load_from_checkpoint(
         checkpoint_path=checkpoint_path,
         model=model,
@@ -81,7 +90,7 @@ def main():
             keys="pred", 
             meta_keys="pred_meta_dict", 
             output_dir=output_dir, 
-            output_postfix="pred", 
+            output_postfix="preds", 
             separate_folder=False, 
             resample=False
         )
@@ -105,7 +114,13 @@ def main():
             inputs = batch_data["image"].to(device)
             
             print("Running sliding window inference...")
-            outputs = sliding_window_inference(inputs, spatial_size, 4, model, overlap=0.5)
+            outputs = sliding_window_inference(
+                inputs = inputs,
+                roi_size = spatial_size,
+                sw_batch_size = 1,
+                predictor = model,
+                overlap = 0.5
+                )
             
             # On stocke les probabilités prédites dans notre dictionnaire
             batch_data["pred"] = outputs

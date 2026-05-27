@@ -29,7 +29,7 @@ def main():
     # --- 1. Configuration ---
     data_dir = PROJECT_ROOT / "data" / "raw"
     spatial_size = (96, 96, 96)
-    batch_size = 2
+    batch_size = 1
     learning_rate = 1e-4
     max_epochs = 100
     
@@ -38,7 +38,7 @@ def main():
     train_loader, val_loader = get_train_val_dataloaders(
         data_dir=data_dir,
         train_transforms=get_train_transforms(spatial_size=spatial_size),
-        val_transforms=get_val_transforms(),
+        val_transforms=get_val_transforms(spatial_size=spatial_size),
         batch_size=batch_size,
         cache_rate=0.0, # No caching for now
         num_workers=0 # Keep at 0 for Windows
@@ -46,7 +46,8 @@ def main():
 
     # --- 3. Model, Loss, Optimizer ---
     print("\nInitializing Model & Lightning Module...")
-    model = get_model(model_name="unet", spatial_size=spatial_size)
+    # model = get_model(model_name="unet", spatial_size=spatial_size)
+    model = get_model(model_name="swin_unetr", spatial_size=spatial_size)
     loss_function = DiceCELoss(to_onehot_y=True, softmax=True, include_background=False)
     
     pl_module = OrganMapperModule(
@@ -59,15 +60,15 @@ def main():
 
     # --- 4. Callbacks & Logger ---
     # W&B Logger initialization
-    wandb_logger = WandbLogger(project="organ-mapper", name="unet_baseline")
+    wandb_logger = WandbLogger(project="organ-mapper", name="swin_unetr_sota")
     
     # Save the best model based on validation loss
     checkpoint_callback = ModelCheckpoint(
         dirpath="checkpoints/",
-        filename="unet-best-{epoch:02d}-{val/loss:.2f}",
+        filename="swin-best-{epoch:02d}-{val/loss:.2f}",
         save_top_k=1,
-        monitor="val/loss",
-        mode="min"
+        monitor="val/dice",
+        mode="max"
     )
 
     # --- 5. Trainer ---
@@ -79,15 +80,15 @@ def main():
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices=1,
         precision="16-mixed", # AMP: Automatic Mixed Precision
-        log_every_n_steps=5
+        log_every_n_steps=5,
+        accumulate_grad_batches=8 # Gradient accumulation to simulate larger batch size
     )
     
     # Start the training loop
     trainer.fit(
         model=pl_module,
         train_dataloaders=train_loader,
-        val_dataloaders=val_loader,
-        ckpt_path="checkpoints/unet-best-epoch=07-val/loss=2.18.ckpt"
+        val_dataloaders=val_loader
         )
 
 if __name__ == "__main__":

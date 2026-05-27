@@ -51,34 +51,79 @@ class OrganMapperModule(pl.LightningModule):
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
         return loss
 
+    # def validation_step(self, batch, batch_idx):
+    #     images, labels = batch["image"], batch["label"]
+        
+    #     # 1. GPU Inference
+    #     outputs = sliding_window_inference(
+    #         inputs=images, 
+    #         roi_size=self.val_roi_size, 
+    #         sw_batch_size=1, 
+    #         predictor=self.model
+    #     )
+        
+    #     # 2. CPU Offloading (FIX OOM 4GB VRAM)
+    #     # We move these massive full-volume tensors back to system RAM!
+    #     outputs = outputs.cpu()
+    #     labels = labels.cpu()
+        
+    #     # Calculate loss on CPU
+    #     loss = self.loss_function(outputs, labels)
+    #     self.log("val/loss", loss, on_epoch=True, prog_bar=True, logger=True)
+        
+    #     # 3. Calculate Dice Score
+    #     # Apply post-processing (list of tensors required by MONAI metrics)
+    #     val_outputs = [self.post_pred(i) for i in outputs]
+    #     val_labels = [self.post_label(i) for i in labels]
+        
+    #     self.dice_metric(y_pred=val_outputs, y=val_labels)
+        
+    #     return loss
+
+    # Validation step without loss calculation to save RAM, only compute Dice score (Swin UNETR is too big for GPU memory with loss)
+    # def validation_step(self, batch, batch_idx):
+    #     images, labels = batch["image"], batch["label"]
+        
+    #     # 1. GPU Inference
+    #     outputs = sliding_window_inference(
+    #         inputs=images, 
+    #         roi_size=self.val_roi_size, 
+    #         sw_batch_size=1, 
+    #         predictor=self.model
+    #     )
+        
+    #     # 2. CPU Offloading
+    #     outputs = outputs.cpu()
+    #     labels = labels.cpu()
+        
+    #     # ON NE CALCULE PLUS LA LOSS ICI POUR SAUVER 1.5 GO DE RAM
+        
+    #     # 3. Calculate Dice Score Directly
+    #     val_outputs = [self.post_pred(i) for i in outputs]
+    #     val_labels = [self.post_label(i) for i in labels]
+        
+    #     self.dice_metric(y_pred=val_outputs, y=val_labels)
+        
+    #     # On ne retourne rien, Lightning s'en accommodera très bien
+    #     return None
+
     def validation_step(self, batch, batch_idx):
         images, labels = batch["image"], batch["label"]
         
-        # 1. GPU Inference
-        outputs = sliding_window_inference(
-            inputs=images, 
-            roi_size=self.val_roi_size, 
-            sw_batch_size=1, 
-            predictor=self.model
-        )
+        # Inférence directe sur le patch (pas de sliding window)
+        outputs = self.forward(images)
         
-        # 2. CPU Offloading (FIX OOM 4GB VRAM)
-        # We move these massive full-volume tensors back to system RAM!
+        # Offloading vers le CPU (les tenseurs sont maintenant tout petits !)
         outputs = outputs.cpu()
         labels = labels.cpu()
         
-        # Calculate loss on CPU
-        loss = self.loss_function(outputs, labels)
-        self.log("val/loss", loss, on_epoch=True, prog_bar=True, logger=True)
-        
-        # 3. Calculate Dice Score
-        # Apply post-processing (list of tensors required by MONAI metrics)
+        # Calcul direct du Dice Score sur ce patch
         val_outputs = [self.post_pred(i) for i in outputs]
         val_labels = [self.post_label(i) for i in labels]
         
         self.dice_metric(y_pred=val_outputs, y=val_labels)
         
-        return loss
+        return None
 
     def on_validation_epoch_end(self):
         # Calculate mean Dice score over the whole validation set
