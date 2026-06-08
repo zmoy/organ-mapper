@@ -13,3 +13,6 @@ __pycache__/
 # Wandb and checkpoint folder
 wandb/
 checkpoints/
+
+# Predictions folder for testing model's results
+predictions/
