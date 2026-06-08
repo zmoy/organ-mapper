@@ -58,12 +58,12 @@ Le script d'inférence intègre la transformation `Invertd` de MONAI pour replac
 ### Surcouche Anatomique (Coupe Axiale)
 > *À gauche : Le scanner CT brut. À droite : La prédiction 3D du U-Net Baseline superposée.*
 
-![Visualisation Inférence]([Insérer le chemin de ton image matplotlib ici, ex: ./assets/matplotlib.png])
+![Visualisation Inférence](./assets/matplotlib.png)
 
 ### Rendu 3D (ITK-SNAP)
 > *Modélisation 3D des organes segmentés par l'IA sur un set de test aveugle.*
 
-![Visualisation 3D]([Insérer le chemin de ton image ITK-SNAP ici, ex: ./assets/itk-snap.png])
+![Visualisation 3D](./assets/itk-snap.png)
 
 ---
 
