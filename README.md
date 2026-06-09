@@ -88,3 +88,6 @@ Génère les volumes .nii.gz prédits à partir de vos meilleurs checkpoints.
 ```bash
 python scripts/predict.py
 ```
+## Contraintes Actuelles & Perspectives d'Amélioration
+
+Conscient des limites matérielles de mon environnement local, j'ai implémenté l'architecture et les pipelines MLOps sur ma machine. Cependant, le modèle final devrait être ré-entraîné sur un cluster Cloud (ex: AWS EC2 avec GPU A10G) avec l'intégration de la Generalized Dice Loss pour gérer le déséquilibre anatomique, et évalué avec le Sliding Window Inference pour extraire la Hausdorff Distance 95, condition sine qua non d'une application clinique.
