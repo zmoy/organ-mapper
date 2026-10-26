@@ -9,7 +9,7 @@ import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
 from torch.optim import AdamW
-from monai.losses import DiceCELoss
+from monai.losses import GeneralizedDiceLoss
 
 # Ignore MONAI's FutureWarning
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -46,9 +46,9 @@ def main():
 
     # --- 3. Model, Loss, Optimizer ---
     print("\nInitializing Model & Lightning Module...")
-    # model = get_model(model_name="unet", spatial_size=spatial_size)
-    model = get_model(model_name="swin_unetr", spatial_size=spatial_size)
-    loss_function = DiceCELoss(to_onehot_y=True, softmax=True, include_background=False)
+    model = get_model(model_name="unet", spatial_size=spatial_size)
+    # model = get_model(model_name="swin_unetr", spatial_size=spatial_size)
+    loss_function = GeneralizedDiceLoss(to_onehot_y=True, softmax=True, include_background=False)
     
     pl_module = OrganMapperModule(
         model=model,
@@ -60,12 +60,12 @@ def main():
 
     # --- 4. Callbacks & Logger ---
     # W&B Logger initialization
-    wandb_logger = WandbLogger(project="organ-mapper", name="swin_unetr_sota")
+    wandb_logger = WandbLogger(project="organ-mapper", name="unet_sota")
     
     # Save the best model based on validation loss
     checkpoint_callback = ModelCheckpoint(
         dirpath="checkpoints/",
-        filename="swin-best-{epoch:02d}-{val/loss:.2f}",
+        filename="unet2-best-{epoch:02d}-{val/loss:.2f}",
         save_top_k=1,
         monitor="val/dice",
         mode="max"

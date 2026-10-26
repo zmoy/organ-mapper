@@ -16,3 +16,8 @@ checkpoints/
 
 # Predictions folder for testing model's results
 predictions/
+
+# Claude Code files
+CLAUDE.md
+CLAUDE.local.md
+.claude/

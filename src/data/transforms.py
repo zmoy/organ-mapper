@@ -13,6 +13,8 @@ from monai.transforms import (
     RandCropByPosNegLabeld,
     RandAffined,
     RandGaussianNoised,
+    Rand3DElasticd,
+    RandShiftIntensityd,
 )
 
 def get_train_transforms(
@@ -76,51 +78,23 @@ def get_train_transforms(
             rotate_range=(0.1, 0.1, 0.1), # slight rotation
             scale_range=(0.1, 0.1, 0.1)   # slight scaling
         ),
-        
+        # Elastic deformation (simulates soft tissue and breathing motion)
+        # Rand3DElasticd(
+        #     keys=["image", "label"],
+        #     mode=("bilinear", "nearest"),
+        #     prob=0.2,
+        #     sigma_range=(5, 7),
+        #     magnitude_range=(50, 150)
+        # ),
+
+        # --- 5. Data Augmentation (Intensity) ---
+        # Intensity offset (simulates variations in scanner calibration)
+        RandShiftIntensityd(keys=["image"], offsets=0.1, prob=0.5),
         # Add slight noise to the image only
         RandGaussianNoised(keys=['image'], prob=0.1, mean=0.0, std=0.1)
     ])
     
     return transforms
-
-# def get_val_transforms(
-#     spacing: tuple[float, float, float] = (1.5, 1.5, 2.0)
-# ) -> Compose:
-#     """
-#     Builds the MONAI transform pipeline for validation and inference.
-#     It standardizes the geometry and intensity, but keeps the full volume intact.
-    
-#     Args:
-#         spacing: The target physical resolution in mm (X, Y, Z).
-        
-#     Returns:
-#         Compose: The composed MONAI transforms pipeline.
-#     """
-    
-#     transforms = Compose([
-#         # --- 1. Load and Standardize ---
-#         LoadImaged(keys=["image", "label"]),
-#         EnsureChannelFirstd(keys=["image", "label"]),
-#         Orientationd(keys=["image", "label"], axcodes="RAS"),
-        
-#         # Resample physical spacing (Must match training spacing exactly)
-#         Spacingd(
-#             keys=["image", "label"], 
-#             pixdim=spacing, 
-#             mode=("bilinear", "nearest")
-#         ),
-        
-#         # --- 2. Intensity Normalization ---
-#         # Soft tissue windowing (Must match training windowing exactly)
-#         ScaleIntensityRanged(
-#             keys=["image"],
-#             a_min=-175.0, a_max=250.0,
-#             b_min=0.0, b_max=1.0,
-#             clip=True
-#         )
-#     ])
-    
-#     return transforms
 
 def get_val_transforms(
     spacing: tuple[float, float, float] = (1.5, 1.5, 2.0),
