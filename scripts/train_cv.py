@@ -8,7 +8,6 @@ import torch
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
-from sklearn.model_selection import KFold
 from torch.optim import AdamW
 from monai.losses import GeneralizedDiceLoss
 from monai.data import Dataset, DataLoader
@@ -18,6 +17,7 @@ import sys
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
 
+from src.data.dataset import get_data_dicts, get_kfold_splits
 from src.data.transforms import get_train_transforms, get_val_transforms
 from src.models.builder import get_model
 from src.training.lightning_module import OrganMapperModule
@@ -32,23 +32,16 @@ def main():
 
     # --- 2. Gather all data dictionaries ---
     # We fetch all training images to split them dynamically
-    images = sorted(list((data_dir / "imagesTr").glob("*.nii.gz")))
-    labels = sorted(list((data_dir / "labelsTr").glob("*.nii.gz")))
-    
-    data_dicts = [{"image": str(i), "label": str(l)} for i, l in zip(images, labels)]
-    
+    data_dicts = get_data_dicts(data_dir)
+
     print(f"Found {len(data_dicts)} total patients. Starting {k_splits}-Fold Cross Validation.")
 
-    # --- 3. Initialize K-Fold Splitter ---
-    kfold = KFold(n_splits=k_splits, shuffle=True, random_state=42)
+    # --- 3. K-Fold split (shared with evaluate.py) ---
+    folds = get_kfold_splits(data_dicts, n_splits=k_splits)
 
     # --- 4. Main Cross-Validation Loop ---
-    for fold, (train_idx, val_idx) in enumerate(kfold.split(data_dicts)):
+    for fold, (train_files, val_files) in enumerate(folds):
         print(f"\n{'='*50}\n🚀 STARTING FOLD {fold + 1}/{k_splits}\n{'='*50}")
-
-        # Split data for this specific fold
-        train_files = [data_dicts[i] for i in train_idx]
-        val_files = [data_dicts[i] for i in val_idx]
 
         print(f"Training samples: {len(train_files)} | Validation samples: {len(val_files)}")
 

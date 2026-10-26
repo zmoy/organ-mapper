@@ -5,7 +5,7 @@ Handles data splitting and PyTorch DataLoader instantiation.
 
 from pathlib import Path
 from monai.data import CacheDataset, DataLoader
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import KFold, train_test_split
 
 def get_data_dicts(data_dir: str | Path) -> list[dict]:
     """
@@ -26,6 +26,30 @@ def get_data_dicts(data_dir: str | Path) -> list[dict]:
     
     data_dicts = [{"image": str(img), "label": str(lbl)} for img, lbl in zip(images, labels)]
     return data_dicts
+
+
+def split_train_val(
+    data_dicts: list[dict], val_split: float = 0.2, seed: int = 42
+) -> tuple[list[dict], list[dict]]:
+    """Deterministic hold-out split (fixed seed for reproducibility)."""
+    return train_test_split(data_dicts, test_size=val_split, random_state=seed)
+
+
+def get_kfold_splits(
+    data_dicts: list[dict], n_splits: int = 5, seed: int = 42
+) -> list[tuple[list[dict], list[dict]]]:
+    """
+    Deterministic K-fold split, shared by train_cv.py and evaluate.py so that
+    each fold's checkpoint is always evaluated on the volumes it never saw.
+
+    Returns:
+        A list of n_splits (train_files, val_files) tuples; fold k is index k - 1.
+    """
+    kfold = KFold(n_splits=n_splits, shuffle=True, random_state=seed)
+    return [
+        ([data_dicts[i] for i in train_idx], [data_dicts[i] for i in val_idx])
+        for train_idx, val_idx in kfold.split(data_dicts)
+    ]
 
 
 def get_train_val_dataloaders(
@@ -55,11 +79,7 @@ def get_train_val_dataloaders(
     data_dicts = get_data_dicts(data_dir)
     
     # Split the dataset deterministically for reproducibility
-    train_files, val_files = train_test_split(
-        data_dicts, 
-        test_size=val_split, 
-        random_state=42 # Fixed seed
-    )
+    train_files, val_files = split_train_val(data_dicts, val_split=val_split)
     
     print(f"Training samples: {len(train_files)}")
     print(f"Validation samples: {len(val_files)}")

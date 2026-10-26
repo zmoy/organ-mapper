@@ -14,6 +14,8 @@ from monai.transforms import (
     RandAffined,
     RandGaussianNoised,
     Rand3DElasticd,
+    CropForegroundd,
+    ResizeWithPadOrCropd,
     RandShiftIntensityd,
 )
 
@@ -98,10 +100,26 @@ def get_train_transforms(
 
 def get_val_transforms(
     spacing: tuple[float, float, float] = (1.5, 1.5, 2.0),
-    spatial_size: tuple[int, int, int] = (96, 96, 96) # Ajout de spatial_size
+    spatial_size: tuple[int, int, int] = (96, 96, 96),
+    full_volume: bool = False
 ) -> Compose:
-    
-    transforms = Compose([
+    """
+    Builds the MONAI transform pipeline for validation.
+
+    Deterministic: a given volume always yields the same output, so the
+    validation Dice is comparable from one epoch to the next.
+
+    Args:
+        spacing: The target physical resolution in mm (X, Y, Z).
+        spatial_size: Patch size used when full_volume is False.
+        full_volume: If True, keep the whole resampled volume (for
+            sliding-window evaluation). Otherwise return a single fixed patch
+            centered on the bounding box of the labeled organs.
+
+    Returns:
+        Compose: The composed MONAI transforms pipeline.
+    """
+    transforms = [
         LoadImaged(keys=["image", "label"]),
         EnsureChannelFirstd(keys=["image", "label"]),
         Orientationd(keys=["image", "label"], axcodes="RAS"),
@@ -116,17 +134,14 @@ def get_val_transforms(
             b_min=0.0, b_max=1.0,
             clip=True
         ),
-        # --- NOUVEAU : On extrait un seul patch de validation au lieu de l'image entière ---
-        RandCropByPosNegLabeld(
-            keys=["image", "label"],
-            label_key="label",
-            spatial_size=spatial_size,
-            pos=1,
-            neg=1,
-            num_samples=1, # 1 seul patch
-            image_key="image",
-            image_threshold=0,
-        )
-    ])
-    
-    return transforms
+    ]
+
+    if not full_volume:
+        # Deterministic single patch: crop to the organs' bounding box, then
+        # center crop/pad to the patch size (no randomness, unlike RandCrop).
+        transforms += [
+            CropForegroundd(keys=["image", "label"], source_key="label"),
+            ResizeWithPadOrCropd(keys=["image", "label"], spatial_size=spatial_size),
+        ]
+
+    return Compose(transforms)

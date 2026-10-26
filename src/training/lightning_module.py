@@ -30,7 +30,10 @@ class OrganMapperModule(pl.LightningModule):
         self.save_hyperparameters(ignore=['model', 'loss_function'])
 
         # --- NEW: Dice Score Metric ---
-        self.dice_metric = DiceMetric(include_background=False, reduction="mean")
+        # One Dice per organ; classes absent from every validation sample come back as NaN
+        self.dice_metric = DiceMetric(
+            include_background=False, reduction="mean_batch", get_not_nans=True
+        )
         
         # Post-processing to convert raw predictions into discrete one-hot formats
         self.post_pred = AsDiscrete(argmax=True, to_onehot=num_classes)
@@ -126,9 +129,17 @@ class OrganMapperModule(pl.LightningModule):
         return None
 
     def on_validation_epoch_end(self):
-        # Calculate mean Dice score over the whole validation set
-        mean_dice = self.dice_metric.aggregate().item()
+        # Per-organ Dice over the whole validation set (organs absent everywhere -> NaN)
+        class_dice, not_nans = self.dice_metric.aggregate()
         self.dice_metric.reset()
-        
+        class_dice = class_dice.cpu()
+        class_dice[not_nans.cpu() == 0] = float("nan")
+
+        # Mean over the organs actually present (skips NaN, no 0 inflating/deflating the mean)
+        mean_dice = torch.nanmean(class_dice).item()
+
         # Log to Weights & Biases
         self.log("val/dice", mean_dice, prog_bar=True, logger=True)
+        for organ, dice in enumerate(class_dice.tolist(), start=1):
+            if dice == dice:  # skip NaN
+                self.log(f"val/dice_organ_{organ:02d}", dice, logger=True)
