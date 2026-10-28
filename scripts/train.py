@@ -40,7 +40,6 @@ def main():
         train_transforms=get_train_transforms(spatial_size=spatial_size),
         val_transforms=get_val_transforms(spatial_size=spatial_size),
         batch_size=batch_size,
-        cache_rate=0.0, # No caching for now
         num_workers=0 # Keep at 0 for Windows
     )
 
@@ -65,7 +64,9 @@ def main():
     # Save the best model based on validation loss
     checkpoint_callback = ModelCheckpoint(
         dirpath="checkpoints/",
-        filename="unet2-best-{epoch:02d}-{val/loss:.2f}",
+        # "/" in a metric name would create a subfolder; keep the name out of the file name
+        filename="unet2-best-epoch{epoch:02d}-dice{val/dice:.2f}",
+        auto_insert_metric_name=False,
         save_top_k=1,
         monitor="val/dice",
         mode="max"

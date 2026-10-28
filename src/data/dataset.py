@@ -4,26 +4,30 @@ Handles data splitting and PyTorch DataLoader instantiation.
 """
 
 from pathlib import Path
-from monai.data import CacheDataset, DataLoader
+from monai.data import DataLoader, Dataset, PersistentDataset
+from monai.data.utils import pickle_hashing
 from sklearn.model_selection import KFold, train_test_split
+
+# On-disk cache of the deterministic part of the pre-processing (data/ is gitignored)
+DEFAULT_CACHE_DIR = Path(__file__).resolve().parents[2] / "data" / "cache"
 
 def get_data_dicts(data_dir: str | Path) -> list[dict]:
     """
     Scans the directory and pairs training images with their labels.
-    
+
     Args:
         data_dir: Path to the raw data directory.
-        
+
     Returns:
         A list of dictionaries, e.g., [{"image": img_path, "label": lbl_path}, ...]
     """
     data_dir = Path(data_dir)
     images = sorted(list((data_dir / "imagesTr").glob("*.nii.gz")))
     labels = sorted(list((data_dir / "labelsTr").glob("*.nii.gz")))
-    
+
     # Ensure every image has a corresponding label
     assert len(images) == len(labels), "Mismatch between number of images and labels."
-    
+
     data_dicts = [{"image": str(img), "label": str(lbl)} for img, lbl in zip(images, labels)]
     return data_dicts
 
@@ -52,70 +56,109 @@ def get_kfold_splits(
     ]
 
 
+def get_dataset(
+    files: list[dict],
+    transforms,
+    cache_dir: str | Path | None = DEFAULT_CACHE_DIR,
+    cache_name: str = "train",
+) -> Dataset:
+    """
+    Builds a dataset whose deterministic transforms (load, orientation, spacing,
+    intensity windowing) are computed once and cached on disk. Random transforms
+    (crop, augmentations) still run on the fly at every epoch.
+
+    Args:
+        files: List of {"image": ..., "label": ...} dictionaries.
+        transforms: MONAI transform pipeline.
+        cache_dir: Root of the on-disk cache; None disables caching.
+        cache_name: Sub-folder of cache_dir. Pipelines with a different
+            deterministic prefix (train vs. val vs. full-volume val) must use
+            different names.
+    """
+    if cache_dir is None:
+        return Dataset(data=files, transform=transforms)
+    return PersistentDataset(
+        data=files,
+        transform=transforms,
+        cache_dir=Path(cache_dir) / cache_name,
+        # New cache entries when the transforms change (json_hashing does NOT detect e.g. a new spacing)
+        hash_transform=pickle_hashing,
+    )
+
+
+def get_loaders(
+    train_files: list[dict],
+    val_files: list[dict],
+    train_transforms,
+    val_transforms=None,
+    batch_size: int = 2,
+    cache_dir: str | Path | None = DEFAULT_CACHE_DIR,
+    num_workers: int = 0
+) -> tuple[DataLoader, DataLoader | None]:
+    """
+    Creates the training and validation DataLoaders from explicit file lists
+    (shared by the hold-out split and the K-fold cross-validation).
+
+    Returns:
+        train_loader, val_loader (None if val_transforms is None)
+    """
+    train_ds = get_dataset(train_files, train_transforms, cache_dir, "train")
+
+    # Note: If batch_size=2 and RandCrop has num_samples=4,
+    # the effective batch size output by the loader will be 8 patches.
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers
+    )
+
+    val_loader = None
+    if val_transforms is not None:
+        val_ds = get_dataset(val_files, val_transforms, cache_dir, "val")
+        val_loader = DataLoader(
+            val_ds,
+            batch_size=1, # Always 1 for 3D validation
+            shuffle=False,
+            num_workers=num_workers
+        )
+
+    return train_loader, val_loader
+
+
 def get_train_val_dataloaders(
     data_dir: str | Path,
     train_transforms,
     val_transforms=None,
     batch_size: int = 2,
     val_split: float = 0.2,
-    cache_rate: float = 1.0,
+    cache_dir: str | Path | None = DEFAULT_CACHE_DIR,
     num_workers: int = 0
 ) -> tuple[DataLoader, DataLoader]:
     """
-    Creates the training and validation DataLoaders.
-    
+    Creates the training and validation DataLoaders for the hold-out split.
+
     Args:
         data_dir: Path to the root data directory.
         train_transforms: MONAI transform pipeline for training.
         val_transforms: MONAI transform pipeline for validation.
         batch_size: Number of volumes per batch.
         val_split: Proportion of data to use for validation.
-        cache_rate: Percentage of data to cache in RAM (0.0 to 1.0).
+        cache_dir: Root of the on-disk pre-processing cache (None = no cache).
         num_workers: Number of CPU workers (keep at 0 on Windows/Jupyter).
-        
+
     Returns:
         train_loader, val_loader
     """
     data_dicts = get_data_dicts(data_dir)
-    
+
     # Split the dataset deterministically for reproducibility
     train_files, val_files = split_train_val(data_dicts, val_split=val_split)
-    
+
     print(f"Training samples: {len(train_files)}")
     print(f"Validation samples: {len(val_files)}")
-    
-    # --- Training DataLoader ---
-    train_ds = CacheDataset(
-        data=train_files, 
-        transform=train_transforms, 
-        cache_rate=cache_rate, 
-        num_workers=num_workers
+
+    return get_loaders(
+        train_files, val_files, train_transforms, val_transforms,
+        batch_size=batch_size, cache_dir=cache_dir, num_workers=num_workers
     )
-    
-    # Note: If batch_size=2 and RandCrop has num_samples=4, 
-    # the effective batch size output by the loader will be 8 patches.
-    train_loader = DataLoader(
-        train_ds, 
-        batch_size=batch_size, 
-        shuffle=True, 
-        num_workers=num_workers
-    )
-    
-    # --- Validation DataLoader ---
-    # We will instantiate the validation loader once its transforms are defined
-    val_loader = None
-    if val_transforms is not None:
-        val_ds = CacheDataset(
-            data=val_files, 
-            transform=val_transforms, 
-            cache_rate=cache_rate, 
-            num_workers=num_workers
-        )
-        val_loader = DataLoader(
-            val_ds, 
-            batch_size=1, # Always 1 for 3D validation
-            shuffle=False, 
-            num_workers=num_workers
-        )
-        
-    return train_loader, val_loader

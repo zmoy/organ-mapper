@@ -10,14 +10,13 @@ from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
 from torch.optim import AdamW
 from monai.losses import GeneralizedDiceLoss
-from monai.data import Dataset, DataLoader
 from pathlib import Path
 import sys
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
 
-from src.data.dataset import get_data_dicts, get_kfold_splits
+from src.data.dataset import get_data_dicts, get_kfold_splits, get_loaders
 from src.data.transforms import get_train_transforms, get_val_transforms
 from src.models.builder import get_model
 from src.training.lightning_module import OrganMapperModule
@@ -45,12 +44,13 @@ def main():
 
         print(f"Training samples: {len(train_files)} | Validation samples: {len(val_files)}")
 
-        # Create localized DataLoaders
-        train_ds = Dataset(data=train_files, transform=get_train_transforms(spatial_size=spatial_size))
-        val_ds = Dataset(data=val_files, transform=get_val_transforms(spatial_size=spatial_size))
-        
-        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
-        val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=0)
+        # Create localized DataLoaders (pre-processing cached on disk, shared by all folds)
+        train_loader, val_loader = get_loaders(
+            train_files, val_files,
+            train_transforms=get_train_transforms(spatial_size=spatial_size),
+            val_transforms=get_val_transforms(spatial_size=spatial_size),
+            batch_size=batch_size,
+        )
 
         # Initialize Model (Reset weights for each fold!)
         model = get_model(model_name="unet", spatial_size=spatial_size)
@@ -69,7 +69,9 @@ def main():
         
         checkpoint_callback = ModelCheckpoint(
             dirpath=f"checkpoints/fold_{fold + 1}/",
-            filename="unet-best-{epoch:02d}-{val/dice:.2f}",
+            # "/" in a metric name would create a subfolder; keep the name out of the file name
+            filename="unet-best-epoch{epoch:02d}-dice{val/dice:.2f}",
+            auto_insert_metric_name=False,
             save_top_k=1,
             monitor="val/dice",
             mode="max"

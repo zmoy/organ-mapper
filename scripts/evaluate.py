@@ -20,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from monai.data import DataLoader, Dataset
+from monai.data import DataLoader
 from monai.inferers import sliding_window_inference
 from monai.metrics import DiceMetric, HausdorffDistanceMetric
 from monai.transforms import AsDiscrete
@@ -30,7 +30,7 @@ sys.path.append(str(PROJECT_ROOT))
 
 from src.models.builder import get_model
 from src.training.lightning_module import OrganMapperModule
-from src.data.dataset import get_data_dicts, get_kfold_splits, split_train_val
+from src.data.dataset import get_data_dicts, get_dataset, get_kfold_splits, split_train_val
 from src.data.transforms import get_val_transforms
 
 SPATIAL_SIZE = (96, 96, 96)
@@ -73,7 +73,8 @@ def to_list(values: np.ndarray) -> list[float | None]:
 
 def find_fold_checkpoint(checkpoints_dir: Path, fold: int) -> Path:
     candidates = sorted(
-        (checkpoints_dir / f"fold_{fold}").glob("*.ckpt"), key=lambda p: p.stat().st_mtime
+        # rglob: older runs wrote "name-val/dice=x.ckpt", i.e. inside a subfolder
+        (checkpoints_dir / f"fold_{fold}").rglob("*.ckpt"), key=lambda p: p.stat().st_mtime
     )
     if not candidates:
         raise FileNotFoundError(f"No .ckpt found in {checkpoints_dir / f'fold_{fold}'}")
@@ -102,7 +103,9 @@ def evaluate_checkpoint(
     model = pl_module.model.to(device)
     model.eval()
 
-    val_ds = Dataset(data=val_files, transform=get_val_transforms(spatial_size=SPATIAL_SIZE, full_volume=True))
+    val_ds = get_dataset(
+        val_files, get_val_transforms(spatial_size=SPATIAL_SIZE, full_volume=True), cache_name="val_full"
+    )
     val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=0)
 
     # reduction="none": one value per patient and per organ
