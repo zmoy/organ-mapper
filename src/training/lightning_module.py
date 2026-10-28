@@ -5,6 +5,7 @@ Encapsulates the model, loss, optimizer, and training/validation steps.
 
 import torch
 import pytorch_lightning as pl
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from monai.inferers import sliding_window_inference
 from monai.metrics import DiceMetric
 from monai.transforms import AsDiscrete
@@ -17,7 +18,10 @@ class OrganMapperModule(pl.LightningModule):
         optimizer_class: type,
         optimizer_kwargs: dict,
         val_roi_size: tuple[int, int, int] = (96, 96, 96),
-        num_classes: int = 14
+        num_classes: int = 14,
+        lr_scheduler: str = "none",
+        warmup_epochs: int = 5,
+        max_epochs: int = 100
     ):
         super().__init__()
         self.model = model
@@ -25,7 +29,10 @@ class OrganMapperModule(pl.LightningModule):
         self.optimizer_class = optimizer_class
         self.optimizer_kwargs = optimizer_kwargs
         self.val_roi_size = val_roi_size
-        
+        self.lr_scheduler = lr_scheduler
+        self.warmup_epochs = warmup_epochs
+        self.max_epochs = max_epochs
+
         # Save hyperparameters to W&B
         self.save_hyperparameters(ignore=['model', 'loss_function'])
 
@@ -44,6 +51,12 @@ class OrganMapperModule(pl.LightningModule):
 
     def configure_optimizers(self):
         optimizer = self.optimizer_class(self.parameters(), **self.optimizer_kwargs)
+        if self.lr_scheduler == "cosine":
+            # Linear warmup, then cosine decay to 0 (stepped once per epoch)
+            warmup = LinearLR(optimizer, start_factor=0.1, total_iters=self.warmup_epochs)
+            cosine = CosineAnnealingLR(optimizer, T_max=max(self.max_epochs - self.warmup_epochs, 1))
+            scheduler = SequentialLR(optimizer, [warmup, cosine], milestones=[self.warmup_epochs])
+            return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "interval": "epoch"}}
         return optimizer
 
     def training_step(self, batch, batch_idx):

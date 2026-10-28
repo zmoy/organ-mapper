@@ -21,25 +21,33 @@ from monai.transforms import (
 
 def get_train_transforms(
     spatial_size: tuple[int, int, int] = (96, 96, 96),
-    spacing: tuple[float, float, float] = (1.5, 1.5, 2.0)
+    spacing: tuple[float, float, float] = (1.5, 1.5, 2.0),
+    num_samples: int = 1,
+    intensity_shift: bool = True
 ) -> Compose:
     """
     Builds the MONAI transform pipeline for training.
-    
+
     Args:
         spatial_size: The patch size for the 3D random crop.
         spacing: The target physical resolution in mm (X, Y, Z).
-        
+        num_samples: Patches drawn per volume each time it is loaded (the
+            loader then yields batch_size * num_samples patches).
+        intensity_shift: Whether to apply RandShiftIntensityd (absent from
+            the original baseline).
+
     Returns:
         Compose: The composed MONAI transforms pipeline.
     """
     
+    shift = [RandShiftIntensityd(keys=["image"], offsets=0.1, prob=0.5)] if intensity_shift else []
+
     transforms = Compose([
         # --- 1. Load and Standardize ---
         LoadImaged(keys=["image", "label"]),
         EnsureChannelFirstd(keys=["image", "label"]),
         Orientationd(keys=["image", "label"], axcodes="RAS"),
-        
+
         # Resample physical spacing
         Spacingd(
             keys=["image", "label"], 
@@ -65,7 +73,7 @@ def get_train_transforms(
             spatial_size=spatial_size,
             pos=1,  # Weight for positive samples (center is an organ)
             neg=1,  # Weight for negative samples (center is background)
-            num_samples=1, # How many patches to extract per volume loaded
+            num_samples=num_samples, # How many patches to extract per volume loaded
             image_key="image",
             image_threshold=0,
         ),
@@ -91,7 +99,7 @@ def get_train_transforms(
 
         # --- 5. Data Augmentation (Intensity) ---
         # Intensity offset (simulates variations in scanner calibration)
-        RandShiftIntensityd(keys=["image"], offsets=0.1, prob=0.5),
+        *shift,
         # Add slight noise to the image only
         RandGaussianNoised(keys=['image'], prob=0.1, mean=0.0, std=0.1)
     ])

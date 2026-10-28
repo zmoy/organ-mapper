@@ -1,99 +1,74 @@
 """
 K-Fold Cross Validation Training Script.
 Trains the model K times on different splits to ensure statistical robustness.
+Uses the same configuration as train.py (src/training/config.py).
+
+Usage:
+    python scripts/train_cv.py
+    python scripts/train_cv.py --folds 1 --max-epochs 30 --logger csv     # quick trial on fold 1
+Checkpoints go to checkpoints/<run_name>/fold_<k>/ ; evaluate them with
+    python scripts/evaluate.py --cv --checkpoints-dir checkpoints/<run_name>
 """
 
-import os
-import torch
-import pytorch_lightning as pl
-from pytorch_lightning.loggers import WandbLogger
-from pytorch_lightning.callbacks import ModelCheckpoint
-from torch.optim import AdamW
-from monai.losses import GeneralizedDiceLoss
-from pathlib import Path
+import argparse
 import sys
+import warnings
+from pathlib import Path
+
+import pytorch_lightning as pl
+
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
 
 from src.data.dataset import get_data_dicts, get_kfold_splits, get_loaders
-from src.data.transforms import get_train_transforms, get_val_transforms
-from src.models.builder import get_model
-from src.training.lightning_module import OrganMapperModule
+from src.training.config import TrainConfig, add_train_args
+from src.training.factory import build_module, build_trainer, build_transforms
 
 def main():
-    # --- 1. Configuration ---
-    data_dir = PROJECT_ROOT / "data" / "raw"
-    spatial_size = (96, 96, 96)
-    batch_size = 2
-    max_epochs = 100
-    k_splits = 5 # Standard 5-Fold CV
+    parser = add_train_args(argparse.ArgumentParser(description=__doc__))
+    parser.add_argument("--n-splits", type=int, default=5, help="Number of folds (standard 5-fold CV).")
+    parser.add_argument("--folds", type=int, nargs="+", default=None,
+                        help="Subset of folds to train, 1-based. Default: all.")
+    args = parser.parse_args()
+    cfg = TrainConfig.from_args(args)
+    print(f"\nConfig: {cfg}")
 
-    # --- 2. Gather all data dictionaries ---
-    # We fetch all training images to split them dynamically
-    data_dicts = get_data_dicts(data_dir)
+    # --- 1. Gather all data dictionaries and split (same folds as evaluate.py) ---
+    data_dicts = get_data_dicts(PROJECT_ROOT / "data" / "raw")
+    folds = get_kfold_splits(data_dicts, n_splits=args.n_splits)
+    selected = args.folds or list(range(1, args.n_splits + 1))
+    print(f"Found {len(data_dicts)} total patients. {args.n_splits}-Fold Cross Validation, folds: {selected}")
 
-    print(f"Found {len(data_dicts)} total patients. Starting {k_splits}-Fold Cross Validation.")
-
-    # --- 3. K-Fold split (shared with evaluate.py) ---
-    folds = get_kfold_splits(data_dicts, n_splits=k_splits)
-
-    # --- 4. Main Cross-Validation Loop ---
-    for fold, (train_files, val_files) in enumerate(folds):
-        print(f"\n{'='*50}\n🚀 STARTING FOLD {fold + 1}/{k_splits}\n{'='*50}")
-
+    # --- 2. Main Cross-Validation Loop ---
+    for fold in selected:
+        train_files, val_files = folds[fold - 1]
+        print(f"\n{'='*50}\n🚀 STARTING FOLD {fold}/{args.n_splits}\n{'='*50}")
         print(f"Training samples: {len(train_files)} | Validation samples: {len(val_files)}")
 
-        # Create localized DataLoaders (pre-processing cached on disk, shared by all folds)
+        pl.seed_everything(cfg.seed)  # same init for every fold
+
+        # Pre-processing cached on disk, shared by all folds
+        train_transforms, val_transforms = build_transforms(cfg)
         train_loader, val_loader = get_loaders(
-            train_files, val_files,
-            train_transforms=get_train_transforms(spatial_size=spatial_size),
-            val_transforms=get_val_transforms(spatial_size=spatial_size),
-            batch_size=batch_size,
+            train_files, val_files, train_transforms, val_transforms, batch_size=cfg.batch_size
         )
 
-        # Initialize Model (Reset weights for each fold!)
-        model = get_model(model_name="unet", spatial_size=spatial_size)
-        loss_function = GeneralizedDiceLoss(to_onehot_y=True, softmax=True, include_background=False)
-        
-        pl_module = OrganMapperModule(
-            model=model,
-            loss_function=loss_function,
-            optimizer_class=AdamW,
-            optimizer_kwargs={"lr": 1e-4, "weight_decay": 1e-5},
-            val_roi_size=spatial_size
+        # Fresh model, loss, optimizer, logger and checkpoint for each fold
+        pl_module = build_module(cfg)
+        trainer = build_trainer(
+            cfg,
+            run_name=f"{cfg.name}_fold_{fold}",
+            ckpt_dir=PROJECT_ROOT / "checkpoints" / cfg.name / f"fold_{fold}",
+            group=cfg.name,
         )
-
-        # Unique W&B Logger and Checkpoint directory for this fold
-        wandb_logger = WandbLogger(project="organ-mapper", name=f"unet_fold_{fold + 1}")
-        
-        checkpoint_callback = ModelCheckpoint(
-            dirpath=f"checkpoints/fold_{fold + 1}/",
-            # "/" in a metric name would create a subfolder; keep the name out of the file name
-            filename="unet-best-epoch{epoch:02d}-dice{val/dice:.2f}",
-            auto_insert_metric_name=False,
-            save_top_k=1,
-            monitor="val/dice",
-            mode="max"
-        )
-
-        # Initialize Trainer
-        trainer = pl.Trainer(
-            max_epochs=max_epochs,
-            logger=wandb_logger,
-            callbacks=[checkpoint_callback],
-            accelerator="gpu" if torch.cuda.is_available() else "cpu",
-            devices=1,
-            precision="16-mixed",
-            log_every_n_steps=5
-        )
-        
-        # Train this fold
         trainer.fit(model=pl_module, train_dataloaders=train_loader, val_dataloaders=val_loader)
-        
+
         # Finish the W&B run so the next fold starts a fresh dashboard
-        import wandb
-        wandb.finish()
+        if cfg.logger == "wandb":
+            import wandb
+            wandb.finish()
 
     print("\n✅ CROSS-VALIDATION COMPLETE!")
 
