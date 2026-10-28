@@ -1,96 +1,55 @@
 """
-Main training script using PyTorch Lightning and Weights & Biases.
+Main training script (single hold-out split) using PyTorch Lightning.
+All settings come from src/training/config.py and can be overridden on the command line.
+
+Usage:
+    python scripts/train.py
+    python scripts/train.py --loss gdl --max-epochs 30 --logger csv
 """
 
-import os
+import argparse
+import sys
 import warnings
-import torch
+from pathlib import Path
+
 import pytorch_lightning as pl
-from pytorch_lightning.loggers import WandbLogger
-from pytorch_lightning.callbacks import ModelCheckpoint
-from torch.optim import AdamW
-from monai.losses import GeneralizedDiceLoss
 
 # Ignore MONAI's FutureWarning
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-import sys
-from pathlib import Path
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
 
-from src.data.transforms import get_train_transforms, get_val_transforms
 from src.data.dataset import get_train_val_dataloaders
-from src.models.builder import get_model
-from src.training.lightning_module import OrganMapperModule
+from src.training.config import TrainConfig, add_train_args
+from src.training.factory import build_module, build_trainer, build_transforms
+
 
 def main():
-    # --- 1. Configuration ---
-    data_dir = PROJECT_ROOT / "data" / "raw"
-    spatial_size = (96, 96, 96)
-    batch_size = 1
-    learning_rate = 1e-4
-    max_epochs = 100
-    
-    # --- 2. Data Pipeline ---
+    cfg = TrainConfig.from_args(add_train_args(argparse.ArgumentParser(description=__doc__)).parse_args())
+    pl.seed_everything(cfg.seed)
+    print(f"\nConfig: {cfg}")
+
+    # --- 1. Data Pipeline (pre-processing cached on disk) ---
     print("\nInitializing DataLoaders...")
+    train_transforms, val_transforms = build_transforms(cfg)
     train_loader, val_loader = get_train_val_dataloaders(
-        data_dir=data_dir,
-        train_transforms=get_train_transforms(spatial_size=spatial_size),
-        val_transforms=get_val_transforms(spatial_size=spatial_size),
-        batch_size=batch_size,
-        num_workers=0 # Keep at 0 for Windows
+        data_dir=PROJECT_ROOT / "data" / "raw",
+        train_transforms=train_transforms,
+        val_transforms=val_transforms,
+        batch_size=cfg.batch_size,
+        num_workers=0  # Keep at 0 for Windows
     )
 
-    # --- 3. Model, Loss, Optimizer ---
+    # --- 2. Model, Loss, Optimizer, Trainer ---
     print("\nInitializing Model & Lightning Module...")
-    model = get_model(model_name="unet", spatial_size=spatial_size)
-    # model = get_model(model_name="swin_unetr", spatial_size=spatial_size)
-    loss_function = GeneralizedDiceLoss(to_onehot_y=True, softmax=True, include_background=False)
-    
-    pl_module = OrganMapperModule(
-        model=model,
-        loss_function=loss_function,
-        optimizer_class=AdamW,
-        optimizer_kwargs={"lr": learning_rate, "weight_decay": 1e-5},
-        val_roi_size=spatial_size
-    )
+    pl_module = build_module(cfg)
+    trainer = build_trainer(cfg, run_name=cfg.name, ckpt_dir=PROJECT_ROOT / "checkpoints" / cfg.name)
 
-    # --- 4. Callbacks & Logger ---
-    # W&B Logger initialization
-    wandb_logger = WandbLogger(project="organ-mapper", name="unet_sota")
-    
-    # Save the best model based on validation loss
-    checkpoint_callback = ModelCheckpoint(
-        dirpath="checkpoints/",
-        # "/" in a metric name would create a subfolder; keep the name out of the file name
-        filename="unet2-best-epoch{epoch:02d}-dice{val/dice:.2f}",
-        auto_insert_metric_name=False,
-        save_top_k=1,
-        monitor="val/dice",
-        mode="max"
-    )
-
-    # --- 5. Trainer ---
+    # --- 3. Train ---
     print("\nStarting Training...")
-    trainer = pl.Trainer(
-        max_epochs=max_epochs,
-        logger=wandb_logger,
-        callbacks=[checkpoint_callback],
-        accelerator="gpu" if torch.cuda.is_available() else "cpu",
-        devices=1,
-        precision="16-mixed", # AMP: Automatic Mixed Precision
-        log_every_n_steps=5,
-        accumulate_grad_batches=8 # Gradient accumulation to simulate larger batch size
-    )
-    
-    # Start the training loop
-    trainer.fit(
-        model=pl_module,
-        train_dataloaders=train_loader,
-        val_dataloaders=val_loader
-        )
+    trainer.fit(model=pl_module, train_dataloaders=train_loader, val_dataloaders=val_loader)
+
 
 if __name__ == "__main__":
     main()
