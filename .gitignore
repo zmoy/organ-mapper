@@ -22,3 +22,14 @@ CLAUDE.md
 CLAUDE.local.md
 .claude/
 ROADMAP.md
+
+# Training logs and trial outputs (metrics CSV, stdout of long runs)
+results/logs/
+results/trial*.log
+results/*.done
+lightning_logs/
+
+# Test and editor caches
+.pytest_cache/
+.vscode/
+*.pyc
