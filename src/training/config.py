@@ -27,6 +27,8 @@ class TrainConfig:
     precision: str = "16-mixed"
     seed: int = 42
     intensity_shift: bool = True       # RandShiftIntensityd augmentation (the baseline had none)
+    sampling: str = "posneg"           # posneg | classes (class-balanced patch centers)
+    rare_weight: float = 3.0           # sampling weight of the rare organs when sampling="classes"
     logger: str = "wandb"              # wandb | csv
     run_name: str | None = None
     fast_dev_run: bool = False
@@ -50,6 +52,8 @@ class TrainConfig:
             max_epochs=args.max_epochs,
             seed=args.seed,
             intensity_shift=not args.no_intensity_shift,
+            sampling=args.sampling,
+            rare_weight=args.rare_weight,
             logger=args.logger,
             run_name=args.run_name,
             fast_dev_run=args.fast_dev_run,
@@ -70,6 +74,10 @@ def add_train_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--max-epochs", type=int, default=d.max_epochs)
     parser.add_argument("--seed", type=int, default=d.seed)
     parser.add_argument("--no-intensity-shift", action="store_true", help="Disable RandShiftIntensityd.")
+    parser.add_argument("--sampling", default=d.sampling, choices=["posneg", "classes"],
+                        help="Patch center sampling: any organ vs background, or class-balanced.")
+    parser.add_argument("--rare-weight", type=float, default=d.rare_weight,
+                        help="With --sampling classes: weight of the rare organs (others = 1, background = 2).")
     parser.add_argument("--logger", default=d.logger, choices=["wandb", "csv"],
                         help="csv writes to results/logs (no W&B account needed).")
     parser.add_argument("--run-name", default=None, help="Default: <model>_<loss>.")
