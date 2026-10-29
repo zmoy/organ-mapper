@@ -32,6 +32,7 @@ class TrainConfig:
     logger: str = "wandb"              # wandb | csv
     run_name: str | None = None
     fast_dev_run: bool = False
+    resume: bool = False
 
     @property
     def name(self) -> str:
@@ -57,6 +58,7 @@ class TrainConfig:
             logger=args.logger,
             run_name=args.run_name,
             fast_dev_run=args.fast_dev_run,
+            resume=args.resume,
         )
 
 
@@ -81,5 +83,8 @@ def add_train_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--logger", default=d.logger, choices=["wandb", "csv"],
                         help="csv writes to results/logs (no W&B account needed).")
     parser.add_argument("--run-name", default=None, help="Default: <model>_<loss>.")
+    parser.add_argument("--resume", action="store_true",
+                        help="Continue an interrupted training from last.ckpt (same options and --run-name as before). "
+                             "Stop a training cleanly with Ctrl+C, or by creating the file STOP in its checkpoint folder.")
     parser.add_argument("--fast-dev-run", action="store_true", help="1 train + 1 val batch, to check the code runs.")
     return parser

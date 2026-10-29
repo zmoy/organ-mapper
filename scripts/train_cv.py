@@ -6,6 +6,8 @@ Uses the same configuration as train.py (src/training/config.py).
 Usage:
     python scripts/train_cv.py
     python scripts/train_cv.py --folds 1 --max-epochs 30 --logger csv     # quick trial on fold 1
+Stop cleanly with Ctrl+C (ends the current epoch first), then continue later with the same
+command plus --resume (finished folds are skipped).
 Checkpoints go to checkpoints/<run_name>/fold_<k>/ ; evaluate them with
     python scripts/evaluate.py --cv --checkpoints-dir checkpoints/<run_name>
 """
@@ -24,7 +26,9 @@ sys.path.append(str(PROJECT_ROOT))
 
 from src.data.dataset import get_data_dicts, get_kfold_splits, get_loaders
 from src.training.config import TrainConfig, add_train_args
-from src.training.factory import build_module, build_trainer, build_transforms
+from src.training.factory import (
+    build_module, build_trainer, build_transforms, fit_with_resume, is_finished,
+)
 
 def main():
     parser = add_train_args(argparse.ArgumentParser(description=__doc__))
@@ -47,6 +51,11 @@ def main():
         print(f"\n{'='*50}\n🚀 STARTING FOLD {fold}/{args.n_splits}\n{'='*50}")
         print(f"Training samples: {len(train_files)} | Validation samples: {len(val_files)}")
 
+        ckpt_dir = PROJECT_ROOT / "checkpoints" / cfg.name / f"fold_{fold}"
+        if cfg.resume and is_finished(ckpt_dir):
+            print(f"Fold {fold} already finished, skipping.")
+            continue
+
         pl.seed_everything(cfg.seed)  # same init for every fold
 
         # Pre-processing cached on disk, shared by all folds
@@ -60,15 +69,20 @@ def main():
         trainer = build_trainer(
             cfg,
             run_name=f"{cfg.name}_fold_{fold}",
-            ckpt_dir=PROJECT_ROOT / "checkpoints" / cfg.name / f"fold_{fold}",
+            ckpt_dir=ckpt_dir,
             group=cfg.name,
+            resume=cfg.resume,
         )
-        trainer.fit(model=pl_module, train_dataloaders=train_loader, val_dataloaders=val_loader)
+        finished = fit_with_resume(trainer, pl_module, train_loader, val_loader, ckpt_dir, cfg.resume)
 
         # Finish the W&B run so the next fold starts a fresh dashboard
         if cfg.logger == "wandb":
             import wandb
             wandb.finish()
+
+        if not finished:
+            print(f"\n⏸️  Stopped during fold {fold}. Same command + --resume to continue.")
+            return
 
     print("\n✅ CROSS-VALIDATION COMPLETE!")
 

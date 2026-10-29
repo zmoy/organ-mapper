@@ -22,7 +22,7 @@ sys.path.append(str(PROJECT_ROOT))
 
 from src.data.dataset import get_train_val_dataloaders
 from src.training.config import TrainConfig, add_train_args
-from src.training.factory import build_module, build_trainer, build_transforms
+from src.training.factory import build_module, build_trainer, build_transforms, fit_with_resume
 
 
 def main():
@@ -44,11 +44,13 @@ def main():
     # --- 2. Model, Loss, Optimizer, Trainer ---
     print("\nInitializing Model & Lightning Module...")
     pl_module = build_module(cfg)
-    trainer = build_trainer(cfg, run_name=cfg.name, ckpt_dir=PROJECT_ROOT / "checkpoints" / cfg.name)
+    ckpt_dir = PROJECT_ROOT / "checkpoints" / cfg.name
+    trainer = build_trainer(cfg, run_name=cfg.name, ckpt_dir=ckpt_dir, resume=cfg.resume)
 
     # --- 3. Train ---
     print("\nStarting Training...")
-    trainer.fit(model=pl_module, train_dataloaders=train_loader, val_dataloaders=val_loader)
+    if not fit_with_resume(trainer, pl_module, train_loader, val_loader, ckpt_dir, cfg.resume):
+        print("\n⏸️  Stopped. Same command + --resume to continue.")
 
 
 if __name__ == "__main__":
