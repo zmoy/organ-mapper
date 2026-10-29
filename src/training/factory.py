@@ -32,7 +32,8 @@ def build_loss(name: str) -> torch.nn.Module:
 
 def build_transforms(cfg: TrainConfig):
     train = get_train_transforms(spatial_size=cfg.spatial_size, num_samples=cfg.num_samples,
-                                intensity_shift=cfg.intensity_shift)
+                                intensity_shift=cfg.intensity_shift,
+                                sampling=cfg.sampling, rare_weight=cfg.rare_weight)
     val = get_val_transforms(spatial_size=cfg.spatial_size)
     return train, val
 
