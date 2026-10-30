@@ -24,6 +24,7 @@ from monai.data import DataLoader
 from monai.inferers import sliding_window_inference
 from monai.metrics import DiceMetric, HausdorffDistanceMetric
 from monai.transforms import AsDiscrete
+from scipy import ndimage
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
@@ -59,6 +60,10 @@ def parse_args() -> argparse.Namespace:
         help="Subset of folds to evaluate, 1-based (--cv only). Default: all.",
     )
     parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument(
+        "--postprocess", action="store_true",
+        help="Keep only the largest connected component of each organ before computing the metrics.",
+    )
     return parser.parse_args()
 
 
@@ -85,11 +90,39 @@ def find_fold_checkpoint(checkpoints_dir: Path, fold: int) -> Path:
     return candidates[-1]
 
 
+def keep_largest_components(onehot: torch.Tensor) -> torch.Tensor:
+    """
+    Post-processing: for each organ keep only its largest connected component and
+    relabel the other islands as background (removes far-away false detections).
+
+    Args:
+        onehot: uint8 one-hot prediction of shape (1, NUM_CLASSES, X, Y, Z).
+
+    Returns:
+        A one-hot uint8 tensor of the same shape.
+    """
+    label_map = onehot[0].argmax(dim=0).numpy().astype(np.uint8)
+    for organ in range(1, NUM_CLASSES):
+        components, n = ndimage.label(label_map == organ)
+        if n > 1:
+            sizes = np.bincount(components.ravel())[1:]
+            label_map[(components > 0) & (components != sizes.argmax() + 1)] = 0
+    cleaned = torch.zeros_like(onehot)
+    for c in range(NUM_CLASSES):
+        cleaned[0, c] = torch.from_numpy(label_map == c)
+    return cleaned
+
+
 def evaluate_checkpoint(
-    checkpoint: Path, model_name: str, val_files: list[dict], device: torch.device
+    checkpoint: Path, model_name: str, val_files: list[dict], device: torch.device,
+    postprocess: bool = False
 ) -> dict:
     """
     Evaluates one checkpoint on full volumes.
+
+    Args:
+        postprocess: Keep only the largest connected component of each organ (see
+            keep_largest_components) before computing the metrics.
 
     Returns:
         dict with per-patient arrays (patients x organs): "dice", "hd95" (NaN where undefined),
@@ -135,6 +168,8 @@ def evaluate_checkpoint(
             # One-hot masks as uint8 (4x smaller than float32)
             val_outputs = torch.stack([post_pred(o) for o in outputs.float()]).to(torch.uint8)
             del outputs
+            if postprocess:
+                val_outputs = keep_largest_components(val_outputs)
             val_labels = torch.stack([post_label(l) for l in labels]).to(torch.uint8)
 
             label_present = val_labels[0, 1:].flatten(1).sum(dim=1).numpy() > 0
@@ -226,7 +261,7 @@ def main():
     # --- Hold-out mode ---
     if not args.cv:
         _, val_files = split_train_val(data_dicts)
-        result = evaluate_checkpoint(args.checkpoint, args.model, val_files, device)
+        result = evaluate_checkpoint(args.checkpoint, args.model, val_files, device, args.postprocess)
         summary = summarize_run(result)
         print_holdout(summary)
 
@@ -234,6 +269,7 @@ def main():
         payload = {
             "checkpoint": str(args.checkpoint),
             "model": args.model,
+            "postprocess": args.postprocess,
             "num_patients": summary["num_patients"],
             "mean_dice": summary["mean_dice"],
             "mean_hd95": None if np.isnan(summary["mean_hd95"]) else summary["mean_hd95"],
@@ -251,7 +287,9 @@ def main():
             ckpt = find_fold_checkpoint(args.checkpoints_dir, fold)
             checkpoints.append(str(ckpt))
             _, val_files = splits[fold - 1]
-            summaries.append(summarize_run(evaluate_checkpoint(ckpt, args.model, val_files, device)))
+            summaries.append(summarize_run(
+                evaluate_checkpoint(ckpt, args.model, val_files, device, args.postprocess)
+            ))
 
         stack = lambda key: np.stack([s[key] for s in summaries])  # noqa: E731
         ddof = 1 if len(folds) > 1 else 0
@@ -272,6 +310,7 @@ def main():
         nn = lambda v: None if np.isnan(v) else float(v)  # noqa: E731
         payload = {
             "model": args.model,
+            "postprocess": args.postprocess,
             "folds": folds,
             "checkpoints": checkpoints,
             "mean_dice": {"mean": agg["mean_dice_mean"], "std": agg["mean_dice_std"]},
