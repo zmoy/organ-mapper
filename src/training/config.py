@@ -29,6 +29,7 @@ class TrainConfig:
     intensity_shift: bool = True       # RandShiftIntensityd augmentation (the baseline had none)
     sampling: str = "posneg"           # posneg | classes (class-balanced patch centers)
     rare_weight: float = 3.0           # sampling weight of the rare organs when sampling="classes"
+    rare_loss_weight: float = 1.0      # loss weight of the rare organs (dicece only); 1 = unweighted
     logger: str = "wandb"              # wandb | csv
     run_name: str | None = None
     fast_dev_run: bool = False
@@ -55,6 +56,7 @@ class TrainConfig:
             intensity_shift=not args.no_intensity_shift,
             sampling=args.sampling,
             rare_weight=args.rare_weight,
+            rare_loss_weight=args.rare_loss_weight,
             logger=args.logger,
             run_name=args.run_name,
             fast_dev_run=args.fast_dev_run,
@@ -80,6 +82,8 @@ def add_train_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
                         help="Patch center sampling: any organ vs background, or class-balanced.")
     parser.add_argument("--rare-weight", type=float, default=d.rare_weight,
                         help="With --sampling classes: weight of the rare organs (others = 1, background = 2).")
+    parser.add_argument("--rare-loss-weight", type=float, default=d.rare_loss_weight,
+                        help="Weight of the rare organs in the DiceCE loss (others = 1; 1 = no weighting).")
     parser.add_argument("--logger", default=d.logger, choices=["wandb", "csv"],
                         help="csv writes to results/logs (no W&B account needed).")
     parser.add_argument("--run-name", default=None, help="Default: <model>_<loss>.")
