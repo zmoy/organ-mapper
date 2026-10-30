@@ -34,6 +34,8 @@ from src.data.dataset import get_data_dicts, get_dataset, get_kfold_splits, spli
 from src.data.transforms import get_val_transforms
 
 SPATIAL_SIZE = (96, 96, 96)
+# Voxel size (mm) of the resampled volumes (default of get_val_transforms), so that HD95 is in mm
+VOXEL_SPACING = (1.5, 1.5, 2.0)
 NUM_CLASSES = 14
 
 
@@ -72,10 +74,12 @@ def to_list(values: np.ndarray) -> list[float | None]:
 
 
 def find_fold_checkpoint(checkpoints_dir: Path, fold: int) -> Path:
-    candidates = sorted(
-        # rglob: older runs wrote "name-val/dice=x.ckpt", i.e. inside a subfolder
-        (checkpoints_dir / f"fold_{fold}").rglob("*.ckpt"), key=lambda p: p.stat().st_mtime
-    )
+    # rglob: older runs wrote "name-val/dice=x.ckpt", i.e. inside a subfolder
+    found = list((checkpoints_dir / f"fold_{fold}").rglob("*.ckpt"))
+    # last.ckpt (resume state) is only a fallback: the best-Dice checkpoint is the reference
+    candidates = sorted((p for p in found if p.name != "last.ckpt"), key=lambda p: p.stat().st_mtime)
+    if not candidates:
+        candidates = found
     if not candidates:
         raise FileNotFoundError(f"No .ckpt found in {checkpoints_dir / f'fold_{fold}'}")
     return candidates[-1]
@@ -93,14 +97,10 @@ def evaluate_checkpoint(
     """
     print(f"Loading checkpoint: {checkpoint}")
     model = get_model(model_name=model_name, spatial_size=SPATIAL_SIZE)
-    pl_module = OrganMapperModule.load_from_checkpoint(
-        checkpoint_path=checkpoint,
-        model=model,
-        loss_function=torch.nn.Identity(),
-        optimizer_class=torch.optim.SGD,
-        optimizer_kwargs={}
-    )
-    model = pl_module.model.to(device)
+    # Only the network weights: the checkpoint may also hold loss buffers (class weights)
+    state = torch.load(checkpoint, map_location="cpu", weights_only=False)["state_dict"]
+    model.load_state_dict({k[len("model."):]: v for k, v in state.items() if k.startswith("model.")})
+    model = model.to(device)
     model.eval()
 
     val_ds = get_dataset(
@@ -109,8 +109,9 @@ def evaluate_checkpoint(
     val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=0)
 
     # reduction="none": one value per patient and per organ
-    dice_metric = DiceMetric(include_background=False, reduction="none")
-    hd95_metric = HausdorffDistanceMetric(include_background=False, percentile=95, reduction="none")
+    # Computed one organ (one channel) at a time to keep the RAM usage low
+    dice_metric = DiceMetric(include_background=True, reduction="none")
+    hd95_metric = HausdorffDistanceMetric(include_background=True, percentile=95, reduction="none")
     post_pred = AsDiscrete(argmax=True, to_onehot=NUM_CLASSES)
     post_label = AsDiscrete(to_onehot=NUM_CLASSES)
 
@@ -131,27 +132,30 @@ def evaluate_checkpoint(
                     sw_device=device, device=torch.device("cpu")
                 )
 
-            val_outputs = torch.stack([post_pred(o) for o in outputs.float()])
-            val_labels = torch.stack([post_label(l) for l in labels])
-
-            dice = dice_metric(y_pred=val_outputs, y=val_labels)[0].cpu().numpy()
-            hd95 = hd95_metric(y_pred=val_outputs, y=val_labels)[0].cpu().numpy()
+            # One-hot masks as uint8 (4x smaller than float32)
+            val_outputs = torch.stack([post_pred(o) for o in outputs.float()]).to(torch.uint8)
+            del outputs
+            val_labels = torch.stack([post_label(l) for l in labels]).to(torch.uint8)
 
             label_present = val_labels[0, 1:].flatten(1).sum(dim=1).numpy() > 0
             pred_present = val_outputs[0, 1:].flatten(1).sum(dim=1).numpy() > 0
 
-            # Organ absent from the ground truth: metric undefined for this patient
-            dice[~label_present] = np.nan
-            hd95[~label_present] = np.nan
-            # Organ present but never predicted: HD95 is infinite, count it as a miss instead
+            dice = np.full(NUM_CLASSES - 1, np.nan)
+            hd95 = np.full(NUM_CLASSES - 1, np.nan)
+            for organ in np.flatnonzero(label_present):  # organ absent from the ground truth: undefined
+                pred = val_outputs[:, organ + 1:organ + 2].float()
+                gt = val_labels[:, organ + 1:organ + 2].float()
+                dice[organ] = dice_metric(y_pred=pred, y=gt)[0, 0].item()
+                # Organ present but never predicted: HD95 is infinite, count it as a miss instead
+                if pred_present[organ]:
+                    hd95[organ] = hd95_metric(y_pred=pred, y=gt, spacing=VOXEL_SPACING)[0, 0].item()
             miss = label_present & ~pred_present
-            hd95[miss] = np.nan
             missed += miss
 
             dice_rows.append(dice)
             hd95_rows.append(hd95)
 
-            del images, labels, outputs, val_outputs, val_labels
+            del images, labels, val_outputs, val_labels
             if device.type == "cuda":
                 torch.cuda.empty_cache()
 
