@@ -24,7 +24,6 @@ from monai.data import DataLoader
 from monai.inferers import sliding_window_inference
 from monai.metrics import DiceMetric, HausdorffDistanceMetric
 from monai.transforms import AsDiscrete
-from scipy import ndimage
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
@@ -33,6 +32,7 @@ from src.models.builder import get_model
 from src.training.lightning_module import OrganMapperModule
 from src.data.dataset import get_data_dicts, get_dataset, get_kfold_splits, split_train_val
 from src.data.transforms import get_val_transforms
+from src.postprocess import keep_largest_components as keep_largest_components_np
 
 SPATIAL_SIZE = (96, 96, 96)
 # Voxel size (mm) of the resampled volumes (default of get_val_transforms), so that HD95 is in mm
@@ -101,12 +101,7 @@ def keep_largest_components(onehot: torch.Tensor) -> torch.Tensor:
     Returns:
         A one-hot uint8 tensor of the same shape.
     """
-    label_map = onehot[0].argmax(dim=0).numpy().astype(np.uint8)
-    for organ in range(1, NUM_CLASSES):
-        components, n = ndimage.label(label_map == organ)
-        if n > 1:
-            sizes = np.bincount(components.ravel())[1:]
-            label_map[(components > 0) & (components != sizes.argmax() + 1)] = 0
+    label_map = keep_largest_components_np(onehot[0].argmax(dim=0).numpy().astype(np.uint8), NUM_CLASSES)
     cleaned = torch.zeros_like(onehot)
     for c in range(NUM_CLASSES):
         cleaned[0, c] = torch.from_numpy(label_map == c)

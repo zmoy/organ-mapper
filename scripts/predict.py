@@ -1,67 +1,97 @@
 """
-Inference script to generate 3D segmentation masks on test images using the trained baseline model.
+Inference script to generate 3D segmentation masks on test images using a trained model.
 Automatically inverts spatial transforms to match the original patient anatomy.
+
+The inference follows the same rules as scripts/evaluate.py (sliding window with
+50 % overlap, AMP, optional post-processing).
+
+Usage:
+    python scripts/predict.py                                  # baseline U-Net, all test images
+    python scripts/predict.py --checkpoint checkpoints/cv_classes/fold_1/<name>.ckpt --postprocess
+    python scripts/predict.py --model swin_unetr --checkpoint checkpoints/swin_trained_best/swin_trained.ckpt
+    python scripts/predict.py --image <file or name in imagesTs>
 """
 
-import os
-import torch
-from pathlib import Path
+import argparse
 import sys
+from pathlib import Path
+
+import torch
 
 # Importations spécifiques MONAI
 from monai.inferers import sliding_window_inference
 from monai.data import Dataset, DataLoader, decollate_batch
 from monai.transforms import (
     Compose, LoadImaged, EnsureChannelFirstd, Orientationd, Spacingd,
-    ScaleIntensityRanged, EnsureTyped, AsDiscreted, Invertd, SaveImaged
+    ScaleIntensityRanged, EnsureTyped, AsDiscreted, Invertd, SaveImaged, MapTransform
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
 
 from src.models.builder import get_model
-from src.training.lightning_module import OrganMapperModule
+from src.postprocess import keep_largest_components
+
+SPATIAL_SIZE = (96, 96, 96)
+NUM_CLASSES = 14
+
+
+class KeepLargestComponentsd(MapTransform):
+    """Dictionary transform applying src.postprocess.keep_largest_components to a label map (1, X, Y, Z)."""
+
+    def __init__(self, keys, num_classes: int = NUM_CLASSES):
+        super().__init__(keys)
+        self.num_classes = num_classes
+
+    def __call__(self, data):
+        d = dict(data)
+        for key in self.key_iterator(d):
+            label_map = d[key][0].cpu().numpy().astype("uint8")
+            cleaned = keep_largest_components(label_map, self.num_classes)
+            d[key][0] = torch.from_numpy(cleaned).to(d[key].dtype)  # in place: keeps the MetaTensor metadata
+        return d
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Segment the test CT volumes and save .nii.gz masks.")
+    parser.add_argument(
+        "--checkpoint", type=Path,
+        default=PROJECT_ROOT / "checkpoints" / "unet_baseline_best" / "unet_baseline.ckpt",
+        help="Model checkpoint (default: the versioned U-Net baseline).",
+    )
+    parser.add_argument("--model", default="unet", choices=["unet", "swin_unetr"],
+                        help="Architecture of the checkpoint.")
+    parser.add_argument("--image", type=Path, default=None,
+                        help="One image (path, or file name inside imagesTs). Default: all of imagesTs.")
+    parser.add_argument("--limit", type=int, default=None, help="Only process the first N images.")
+    parser.add_argument("--postprocess", action="store_true",
+                        help="Keep only the largest connected component of each organ.")
+    parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "predictions")
+    return parser.parse_args()
+
 
 def main():
+    args = parse_args()
+
     # --- 1. Configuration ---
     test_images_dir = PROJECT_ROOT / "data" / "raw" / "imagesTs"
-    output_dir = PROJECT_ROOT / "predictions"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Baseline UNet
-    # checkpoint_path = PROJECT_ROOT / "checkpoints" / "unet_baseline_best" / "unet_baseline.ckpt" 
-    
-    # Swin Transformer
-    checkpoint_path = PROJECT_ROOT / "checkpoints" / "swin_trained_best" / "swin_trained.ckpt"
-    
-    spatial_size = (96, 96, 96)
-    
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Running inference on device: {device}")
 
     # --- 2. Chargement du Modèle ---
-    print(f"Loading checkpoint from: {checkpoint_path}")
-    
-    # Unet Model
-    # model = get_model(model_name="unet", spatial_size=spatial_size)
-    
-    # Swin UNETR Model
-    model = get_model(model_name="swin_unetr", spatial_size=spatial_size)
-
-    pl_module = OrganMapperModule.load_from_checkpoint(
-        checkpoint_path=checkpoint_path,
-        model=model,
-        loss_function=torch.nn.Identity(), 
-        optimizer_class=torch.optim.SGD, 
-        optimizer_kwargs={}
-    )
-    
-    model = pl_module.model.to(device)
+    print(f"Loading {args.model} checkpoint from: {args.checkpoint}")
+    model = get_model(model_name=args.model, spatial_size=SPATIAL_SIZE)
+    # Only the network weights: the checkpoint may also hold loss buffers (class weights)
+    state = torch.load(args.checkpoint, map_location="cpu", weights_only=False)["state_dict"]
+    model.load_state_dict({k[len("model."):]: v for k, v in state.items() if k.startswith("model.")})
+    model = model.to(device)
     model.eval()
 
     # --- 3. Pipelines MONAI (Le secret est ici) ---
-    
-    # A. Pré-traitement (Aller vers l'espace du modèle : 234x234x206)
+
+    # A. Pré-traitement (Aller vers l'espace du modèle). Must match src/data/transforms.py exactly.
     inference_transforms = Compose([
         LoadImaged(keys=["image"]),
         EnsureChannelFirstd(keys=["image"]),
@@ -70,10 +100,15 @@ def main():
         ScaleIntensityRanged(keys=["image"], a_min=-175.0, a_max=250.0, b_min=0.0, b_max=1.0, clip=True)
     ])
 
-    # B. Post-traitement (Retourner vers l'espace original du patient : 512x512x138)
-    post_transforms = Compose([
+    # B. Post-traitement (Retourner vers l'espace original du patient)
+    post_steps = [
         EnsureTyped(keys="pred"),
         AsDiscreted(keys="pred", argmax=True),
+    ]
+    if args.postprocess:
+        # In the model space, before going back to the patient space (same rule as evaluate.py)
+        post_steps.append(KeepLargestComponentsd(keys="pred"))
+    post_transforms = Compose(post_steps + [
         # L'inversion spatiale magique !
         Invertd(
             keys="pred",
@@ -87,49 +122,60 @@ def main():
         ),
         # Sauvegarde automatique par MONAI
         SaveImaged(
-            keys="pred", 
-            meta_keys="pred_meta_dict", 
-            output_dir=output_dir, 
-            output_postfix="preds", 
-            separate_folder=False, 
+            keys="pred",
+            meta_keys="pred_meta_dict",
+            output_dir=args.output_dir,
+            output_postfix="preds",
+            separate_folder=False,
             resample=False
         )
     ])
 
     # --- 4. Boucle d'Inférence ---
-    test_files = sorted(list(test_images_dir.glob("*.nii.gz")))
-    if not test_files:
-        print("Erreur : Aucune image trouvée dans le dossier imagesTs.")
+    if args.image is not None:
+        image_path = args.image if args.image.exists() else test_images_dir / args.image
+        test_files = [image_path]
+    else:
+        test_files = sorted(test_images_dir.glob("*.nii.gz"))
+    if args.limit is not None:
+        test_files = test_files[:args.limit]
+    if not test_files or not all(f.exists() for f in test_files):
+        print(f"Erreur : aucune image trouvée ({args.image or test_images_dir}).")
         return
-        
-    image_path = test_files[1]
-    print(f"\nProcessing image: {image_path.name}")
-    
-    # Création d'un mini DataLoader pour utiliser la mécanique MONAI
-    test_ds = Dataset(data=[{"image": str(image_path)}], transform=inference_transforms)
-    test_loader = DataLoader(test_ds, batch_size=1)
 
-    with torch.no_grad():
-        for batch_data in test_loader:
-            inputs = batch_data["image"].to(device)
-            
-            print("Running sliding window inference...")
-            outputs = sliding_window_inference(
-                inputs = inputs,
-                roi_size = spatial_size,
-                sw_batch_size = 1,
-                predictor = model,
-                overlap = 0.5
-                )
-            
-            # On stocke les probabilités prédites dans notre dictionnaire
-            batch_data["pred"] = outputs
-            
-            # Decollate sépare le batch pour appliquer le post-traitement image par image
-            for i in decollate_batch(batch_data):
-                post_transforms(i)
-                
-    print(f"\nSuccess! La prédiction a été redimensionnée et sauvegardée dans {output_dir}")
+    for n, image_path in enumerate(test_files, start=1):
+        print(f"\n[{n}/{len(test_files)}] Processing image: {image_path.name}")
+
+        # Création d'un mini DataLoader pour utiliser la mécanique MONAI
+        test_ds = Dataset(data=[{"image": str(image_path)}], transform=inference_transforms)
+        test_loader = DataLoader(test_ds, batch_size=1)
+
+        with torch.no_grad():
+            for batch_data in test_loader:
+                inputs = batch_data["image"].to(device)
+
+                print("Running sliding window inference...")
+                # sw_device: patches on GPU; device: stitched output on CPU (4 GB of VRAM)
+                with torch.autocast(device_type=device.type, enabled=device.type == "cuda"):
+                    outputs = sliding_window_inference(
+                        inputs=inputs,
+                        roi_size=SPATIAL_SIZE,
+                        sw_batch_size=1,
+                        predictor=model,
+                        overlap=0.5,
+                        sw_device=device,
+                        device=torch.device("cpu"),
+                    )
+
+                # On stocke les probabilités prédites dans notre dictionnaire
+                batch_data["pred"] = outputs.float()
+
+                # Decollate sépare le batch pour appliquer le post-traitement image par image
+                for i in decollate_batch(batch_data):
+                    post_transforms(i)
+
+    print(f"\nSuccess! Les prédictions ont été redimensionnées et sauvegardées dans {args.output_dir}")
+
 
 if __name__ == "__main__":
     main()
