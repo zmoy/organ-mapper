@@ -25,7 +25,7 @@ ROADMAP.md
 
 # Training logs and trial outputs (metrics CSV, stdout of long runs)
 results/logs/
-results/trial*.log
+results/*.log
 results/*.done
 lightning_logs/
 
