@@ -1,0 +1,37 @@
+C:\Users\zmoy0\Desktop\personal_projects\organ-mapper\venv\Lib\site-packages\monai\utils\deprecate_utils.py:321: FutureWarning: monai.transforms.spatial.dictionary Orientationd.__init__:labels: Current default value of argument `labels=(('L', 'R'), ('P', 'A'), ('I', 'S'))` was changed in version None from `labels=(('L', 'R'), ('P', 'A'), ('I', 'S'))` to `labels=None`. Default value changed to None meaning that the transform now uses the 'space' of a meta-tensor, if applicable, to determine appropriate axis labels.
+  warn_deprecated(argname, msg, warning_category)
+C:\Users\zmoy0\Desktop\personal_projects\organ-mapper\venv\Lib\site-packages\monai\utils\deprecate_utils.py:221: FutureWarning: monai.metrics.utils get_mask_edges:always_return_as_numpy: Argument `always_return_as_numpy` has been deprecated since version 1.5.0. It will be removed in version 1.7.0. The option is removed and the return type will always be equal to the input type.
+  warn_deprecated(argname, msg, warning_category)
+Running clinical evaluation on device: cuda
+
+Loading checkpoint: checkpoints\unet_baseline_best\unet_baseline.ckpt
+Evaluating on 6 full patient volumes...
+  Patient 1/6 - Sliding Window Inference...
+  Patient 2/6 - Sliding Window Inference...
+  Patient 3/6 - Sliding Window Inference...
+  Patient 4/6 - Sliding Window Inference...
+  Patient 5/6 - Sliding Window Inference...
+  Patient 6/6 - Sliding Window Inference...
+
+============================================================
+FINAL CLINICAL RESULTS (full volumes)
+============================================================
+Organ           Dice     HD95 (mm)       NSD    Missed
+1              0.730          73.2     0.512         0
+2              0.809          90.1     0.592         0
+3              0.746           9.9     0.586         0
+4              0.000         777.3     0.000         6
+5              0.000         777.3     0.000         6
+6              0.918          69.5     0.595         0
+7              0.569         140.7     0.291         0
+8              0.780          61.0     0.680         0
+9              0.654          17.3     0.489         0
+10             0.000         777.3     0.000         6
+11             0.499          25.7     0.353         0
+12             0.000         777.3     0.000         6
+13             0.000         777.3     0.000         6
+------------------------------------------------------------
+Mean Dice: 0.4388  |  Mean HD95: 336.46 mm  |  Mean NSD: 0.3153
+(missed organs: HD95 = volume diagonal, NSD = 0)
+============================================================
+Results saved to results\evaluation_baseline_nsd.json

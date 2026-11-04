@@ -34,7 +34,7 @@ L'entraînement de modèles 3D massifs est notoirement coûteux en mémoire. Pou
 3. **Patch-based Validation :** Abandon du *Sliding Window Inference* global en phase de validation au profit d'une évaluation par patchs pour prévenir les erreurs d'allocation système (`alloc_cpu.cpp OOM`).
 
 4. **Entraînement reprenable :** Ctrl+C arrête proprement à la fin de l'epoch (`last.ckpt`), et `--resume` reprend là où l'entraînement s'est arrêté (les folds terminés sont sautés).
-5. **Évaluation économe en RAM :** Dice et HD95 calculés organe par organe sur des masques `uint8`.
+5. **Évaluation économe en RAM :** Dice, HD95 et NSD calculés organe par organe sur des masques `uint8`.
 
 Les expériences peuvent être trackées sur **Weights & Biases** (ou en CSV avec `--logger csv`).
 
@@ -42,20 +42,41 @@ Les expériences peuvent être trackées sur **Weights & Biases** (ou en CSV ave
 
 ## 📊 Expériences & Résultats
 
-Les modèles sont entraînés sur un jeu très restreint (24 images d'entraînement, 6 de validation par fold) pour observer leur comportement en régime "Low-Data". Toutes les métriques sont calculées sur **volumes entiers** (sliding window, recouvrement 50 %) ; le **HD95 est en millimètres** (spacing 1.5 × 1.5 × 2.0 mm) et ne couvre que les organes prédits au moins une fois.
+Les modèles sont entraînés sur un jeu très restreint (24 images d'entraînement, 6 de validation par fold) pour observer leur comportement en régime "Low-Data". Toutes les métriques sont calculées sur **volumes entiers** (sliding window, recouvrement 50 %) et moyennées sur les 13 organes :
+* **Dice** : recouvrement volumique.
+* **HD95** en millimètres (spacing 1.5 × 1.5 × 2.0 mm) : 95e percentile de la distance entre les contours prédit et réel.
+* **NSD** (*Normalized Surface Distance*, tolérance 2 mm) : part du contour placée à moins de 2 mm du contour réel, recommandée par *Metrics Reloaded* pour les petites structures.
+* Un organe **jamais prédit** compte la pire valeur possible : HD95 = diagonale du volume (~700 mm) et NSD = 0. C'est pourquoi un seul organe manqué fait exploser le HD95 moyen.
 
 ### U-Net : de la baseline à la validation croisée
 
-| Modèle | Protocole | Dice | HD95 (mm) |
-| :--- | :--- | :--- | :--- |
-| U-Net baseline (4.8 M) | hold-out, 6 volumes | 0.439 | 61.0 (8 organes sur 13 prédits) |
-| U-Net, DiceCE + patchs par classe + cosinus, 250 epochs | **CV 5 folds** | **0.564 ± 0.016** | 111.3 ± 52.5 |
-| idem + post-traitement | CV 5 folds | **0.567 ± 0.018** | **47.5 ± 32.4** |
-| idem + loss pondérée sur les petits organes + post-traitement | fold 1 uniquement (CV à venir) | **0.654** | **23.1** |
+| Modèle | Protocole | Dice | HD95 (mm) | NSD |
+| :--- | :--- | :--- | :--- | :--- |
+| U-Net baseline (4.8 M) | hold-out, 6 volumes | 0.439 | 336.5 | 0.315 |
+| U-Net, DiceCE + patchs par classe + cosinus, 250 epochs + post-traitement | CV 5 folds | 0.567 ± 0.018 | 133.2 ± 8.9 | 0.455 ± 0.010 |
+| idem + loss pondérée sur les petits organes (`--rare-loss-weight 5`) | **CV 5 folds** | **0.666 ± 0.027** | **23.7 ± 5.6** | **0.565 ± 0.026** |
 
-* **Post-traitement :** conservation de la plus grande composante connectée de chaque organe, ce qui supprime les fausses détections lointaines et divise le HD95 par plus de deux, sans dégrader le Dice.
-* **Loss pondérée (`--rare-loss-weight 5`) :** elle permet de détecter les organes 12 et 13, jamais détectés sans (Dice 0 sur les 5 folds), avec des Dice de 0.45 et 0.53 sur le fold 1. Ce gain n'est pas encore confirmé en validation croisée.
-* **Ce qui a vraiment fait la différence :** l'échantillonnage de patchs par classe (+16 points de Dice sur le fold 1) et une durée d'entraînement suffisante (250 epochs, la courbe de Dice reste plate pendant ~60 epochs avant de décoller).
+Organes manqués : 5 sur 13 pour la baseline (organes 4, 5, 10, 12 et 13), 2 sur 13 sans la loss pondérée (organes 12 et 13, sur les 5 folds), aucun avec.
+
+Effet de la loss pondérée sur les petits organes (Dice moyen sur les 5 folds, avec post-traitement) :
+
+| Organe | sans pondération | avec pondération ×5 |
+| :--- | :--- | :--- |
+| 4 | 0.152 | **0.480** |
+| 5 | 0.544 | **0.627** |
+| 10 | 0.478 | **0.571** |
+| 12 | 0.000 | **0.453** |
+| 13 | 0.000 | **0.489** |
+
+* **Loss pondérée (`--rare-loss-weight 5`) :** les organes 12 et 13 sont désormais détectés sur les 5 folds et l'organe 4 triple son Dice. Les gros organes reculent légèrement (organe 2 : 0.83 → 0.79, organe 11 : 0.53 → 0.48), mais le Dice moyen gagne 10 points et le HD95 est divisé par 5.6.
+* **Post-traitement :** conservation de la plus grande composante connectée de chaque organe. Il supprime les fausses détections lointaines : mesuré sur la CV sans pondération, il divisait par plus de deux le HD95 des organes détectés, sans dégrader le Dice.
+* **Ce qui a vraiment fait la différence :** l'échantillonnage de patchs par classe (+16 points de Dice sur le fold 1), une durée d'entraînement suffisante (250 epochs, la courbe de Dice reste plate pendant ~60 epochs avant de décoller), puis la pondération de la loss.
+
+### ⚠️ Limites méthodologiques
+
+* **Réglages choisis sur le fold 1 :** l'échantillonnage, les poids de classes et la durée d'entraînement ont été réglés en regardant la validation du fold 1. Ses 6 volumes ont donc servi à la fois au réglage et à l'évaluation, et son score est optimiste. Les 4 autres folds n'ont pas servi au réglage : leur Dice moyen avec la loss pondérée (0.672) est proche de celui du fold 1 (0.640), ce qui suggère que ce biais reste faible.
+* **Sélection du checkpoint :** chaque fold est évalué avec son meilleur checkpoint (Dice maximal sur sa propre validation), ce qui biaise légèrement les scores à la hausse. Dans les entraînements ci-dessus, `last.ckpt` était une copie du meilleur checkpoint (comportement de `save_last` dans Lightning 2.x, corrigé depuis) : l'écart avec le dernier checkpoint n'a donc pas encore pu être mesuré. Les prochains entraînements permettront de le faire avec `evaluate.py --checkpoint-kind last`.
+* **Pas de jeu de test indépendant :** les 30 volumes annotés servent tous à la validation croisée ; les images de `imagesTs` n'ont pas d'annotation.
 
 ### Comparaison avec Swin UNETR
 
@@ -97,29 +118,37 @@ pip install -r requirements.txt
 Tous les réglages (modèle, loss, patchs, scheduler...) se passent en ligne de commande (`python scripts/train.py --help`). Configuration de référence, en validation croisée 5 folds :
 
 ```bash
-python scripts/train_cv.py --run-name cv_classes --logger csv --max-epochs 250   --lr-scheduler cosine --warmup-epochs 5 --loss dicece --num-samples 4 --batch-size 2   --sampling classes --rare-weight 3 --rare-loss-weight 5
+python scripts/train_cv.py --run-name cv_classes_w5 --logger csv --max-epochs 250   --lr-scheduler cosine --warmup-epochs 5 --loss dicece --num-samples 4 --batch-size 2   --sampling classes --rare-weight 3 --rare-loss-weight 5
 ```
 
 Ctrl+C arrête proprement à la fin de l'epoch ; la même commande avec `--resume` reprend l'entraînement.
 
-**3. Évaluation en volume entier (Dice + HD95 en mm) :**
+**3. Évaluation en volume entier (Dice, HD95 en mm, NSD) :**
 
 ```bash
-python scripts/evaluate.py --cv --checkpoints-dir checkpoints/cv_classes --postprocess
+python scripts/evaluate.py --cv --checkpoints-dir checkpoints/cv_classes_w5 --postprocess
+```
+
+Ajouter `--checkpoint-kind last` pour évaluer le dernier checkpoint de chaque fold au lieu du meilleur.
+
+**Tests rapides (sans données ni GPU) :**
+
+```bash
+pytest tests/test_core.py
 ```
 
 **4. Lancement de l'inférence :**
 Génère les volumes .nii.gz prédits (par défaut sur toutes les images de `imagesTs`) à partir du checkpoint de votre choix.
 
 ```bash
-python scripts/predict.py --checkpoint checkpoints/cv_classes/fold_1/<checkpoint>.ckpt --postprocess
+python scripts/predict.py --checkpoint checkpoints/cv_classes_w5/fold_1/<checkpoint>.ckpt --postprocess
 ```
 
 ## Contraintes Actuelles & Perspectives d'Amélioration
 
 Conscient des limites matérielles de mon environnement local (4 Go de VRAM), j'ai implémenté l'architecture et les pipelines MLOps sur ma machine. Les pistes restantes :
 
-* **Confirmer la loss pondérée en validation croisée** (aujourd'hui testée sur un seul fold).
-* **Organes encore difficiles :** l'organe 4 (Dice ~0.3 sur le fold 1) et l'organe 10 (~0.55).
+* **Comparaison à nnU-Net** sur les mêmes folds, et **ensemble des 5 folds** pour l'inférence.
+* **Organes encore difficiles :** les organes 4, 11, 12 et 13 restent sous 0.5 de Dice en validation croisée.
 * **Augmentations de données** (déformation élastique, déjà écrite dans `transforms.py`) et patchs plus grands ou spacing plus fin.
 * **Ré-entraînement cloud** (ex : AWS EC2 avec GPU A10G) pour des modèles plus gros, et pré-entraînement du Swin UNETR.
