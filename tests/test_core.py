@@ -4,7 +4,8 @@ Fast unit tests (no real data, no GPU, a few seconds):
     - deterministic K-fold split without leakage,
     - class-balanced patch sampling (on small synthetic NIfTI volumes),
     - loss construction with class weights,
-    - checkpoint selection of the evaluation (best vs last).
+    - checkpoint selection of the evaluation (best vs last),
+    - last.ckpt written at every epoch during training (not only with the best).
 
 Run with:
     pytest tests/test_core.py
@@ -17,7 +18,9 @@ from pathlib import Path
 import nibabel as nib
 import numpy as np
 import pytest
+import pytorch_lightning as pl
 import torch
+from torch.utils.data import DataLoader, TensorDataset
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -25,7 +28,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.data.dataset import get_kfold_splits
 from src.data.transforms import NUM_CLASSES, RARE_CLASSES, get_class_ratios, get_train_transforms
 from src.postprocess import keep_largest_components
-from src.training.factory import build_loss
+from src.training.factory import build_checkpoint_callbacks, build_loss
 
 
 def _load_script(name: str):
@@ -175,3 +178,35 @@ def test_find_fold_checkpoint_best_and_last(tmp_path):
     assert evaluate.find_fold_checkpoint(tmp_path, 1, kind="last").name == "last.ckpt"
     with pytest.raises(FileNotFoundError):
         evaluate.find_fold_checkpoint(tmp_path, 2)
+
+
+# --- Training: checkpoints written during fit ---
+
+class _DecliningDiceModule(pl.LightningModule):
+    """Tiny model whose val/dice is best at epoch 0 and then decreases."""
+
+    def __init__(self):
+        super().__init__()
+        self.layer = torch.nn.Linear(2, 1)
+
+    def training_step(self, batch, batch_idx):
+        return self.layer(batch[0]).pow(2).mean()
+
+    def validation_step(self, batch, batch_idx):
+        self.log("val/dice", 1.0 / (self.current_epoch + 1))
+
+    def configure_optimizers(self):
+        return torch.optim.SGD(self.parameters(), lr=0.1)
+
+
+def test_last_checkpoint_follows_the_last_epoch_not_the_best(tmp_path):
+    loader = DataLoader(TensorDataset(torch.randn(4, 2)), batch_size=2)
+    trainer = pl.Trainer(
+        max_epochs=3, callbacks=build_checkpoint_callbacks("run", tmp_path), logger=False,
+        accelerator="cpu", enable_progress_bar=False, enable_model_summary=False,
+    )
+    trainer.fit(_DecliningDiceModule(), train_dataloaders=loader, val_dataloaders=loader)
+
+    best = [p for p in tmp_path.glob("*.ckpt") if p.name != "last.ckpt"]
+    assert [p.name for p in best] == ["run-epoch00-dice1.00.ckpt"]
+    assert torch.load(tmp_path / "last.ckpt", weights_only=False)["epoch"] == 2

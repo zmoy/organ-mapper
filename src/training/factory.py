@@ -72,6 +72,44 @@ def _read_csv_history(path: Path) -> list[dict[str, float]]:
         return [{k: float(v) for k, v in row.items() if v not in ("", None)} for row in csv.DictReader(f)]
 
 
+def build_checkpoint_callbacks(run_name: str, ckpt_dir: Path) -> list[ModelCheckpoint]:
+    """
+    Two checkpoint callbacks writing to ckpt_dir.
+
+    The first keeps the best epoch on val/dice. The second rewrites last.ckpt at
+    the end of every epoch (full state: weights, optimizer, scheduler), which is
+    what --resume and evaluate.py --checkpoint-kind last rely on. A single
+    ModelCheckpoint(save_last=True) is not enough: since Lightning 2.x it only
+    writes last.ckpt when a new best checkpoint is saved, so last.ckpt was a copy
+    of the best one.
+
+    Args:
+        run_name: Prefix of the best checkpoint's file name.
+        ckpt_dir: Output directory (absolute path).
+
+    Returns:
+        The [best, last] callbacks.
+    """
+    best = ModelCheckpoint(
+        dirpath=str(ckpt_dir),
+        # "/" in a metric name would create a subfolder; keep the name out of the file name
+        filename=f"{run_name}-epoch{{epoch:02d}}-dice{{val/dice:.2f}}",
+        auto_insert_metric_name=False,
+        save_top_k=1,
+        monitor="val/dice",
+        mode="max",
+    )
+    last = ModelCheckpoint(
+        dirpath=str(ckpt_dir),
+        filename="last",
+        monitor=None,  # no monitor + top_k=1: keep only the most recent epoch
+        save_top_k=1,
+        every_n_epochs=1,
+        enable_version_counter=False,  # overwrite last.ckpt instead of writing last-v1.ckpt
+    )
+    return [best, last]
+
+
 def build_trainer(
     cfg: TrainConfig, run_name: str, ckpt_dir: Path, group: str | None = None, resume: bool = False
 ) -> pl.Trainer:
@@ -96,22 +134,11 @@ def build_trainer(
         # so that the epochs run before the stop stay in the log.
         logger.experiment.metrics = history
 
-    checkpoint = ModelCheckpoint(
-        dirpath=str(ckpt_dir),
-        # "/" in a metric name would create a subfolder; keep the name out of the file name
-        filename=f"{run_name}-epoch{{epoch:02d}}-dice{{val/dice:.2f}}",
-        auto_insert_metric_name=False,
-        save_top_k=1,
-        monitor="val/dice",
-        mode="max",
-        save_last=True,  # last.ckpt = full state (weights, optimizer, scheduler) to resume from
-    )
-
     return pl.Trainer(
         max_epochs=cfg.max_epochs,
         logger=logger,
         callbacks=[
-            checkpoint,
+            *build_checkpoint_callbacks(run_name, ckpt_dir),
             LearningRateMonitor(logging_interval="epoch"),
             GracefulStop(Path(ckpt_dir) / "STOP"),
         ],
