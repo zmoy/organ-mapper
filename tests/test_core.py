@@ -5,6 +5,7 @@ Fast unit tests (no real data, no GPU, a few seconds):
     - class-balanced patch sampling (on small synthetic NIfTI volumes),
     - loss construction with class weights,
     - checkpoint selection of the evaluation (best vs last),
+    - full-volume inference (default settings, mirroring test-time augmentation),
     - last.ckpt written at every epoch during training (not only with the best).
 
 Run with:
@@ -27,6 +28,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data.dataset import get_kfold_splits
 from src.data.transforms import NUM_CLASSES, RARE_CLASSES, get_class_ratios, get_train_transforms
+from monai.inferers import sliding_window_inference
+
+from src.inference import MIRROR_AXES, predict_volume
 from src.postprocess import keep_largest_components
 from src.training.factory import build_checkpoint_callbacks, build_loss
 
@@ -178,6 +182,57 @@ def test_find_fold_checkpoint_best_and_last(tmp_path):
     assert evaluate.find_fold_checkpoint(tmp_path, 1, kind="last").name == "last.ckpt"
     with pytest.raises(FileNotFoundError):
         evaluate.find_fold_checkpoint(tmp_path, 2)
+
+
+# --- Inference: sliding window and test-time augmentation ---
+
+def test_mirror_axes_cover_the_8_flip_combinations():
+    assert len(MIRROR_AXES) == 8 and len(set(MIRROR_AXES)) == 8
+    assert MIRROR_AXES[0] == () and (2, 3, 4) in MIRROR_AXES
+
+
+def test_default_inference_matches_plain_sliding_window():
+    torch.manual_seed(0)
+    model = torch.nn.Conv3d(1, 3, kernel_size=3, padding=1).eval()
+    image = torch.randn(1, 1, 20, 18, 16)
+    with torch.no_grad():
+        expected = torch.softmax(sliding_window_inference(image, (8, 8, 8), 1, model, overlap=0.5), dim=1)
+    probs = predict_volume(model, image, (8, 8, 8), torch.device("cpu"))
+    assert probs.shape == (1, 3, 20, 18, 16)
+    assert torch.allclose(probs, expected, atol=1e-5)
+
+
+def test_tta_is_neutral_for_a_flip_invariant_model():
+    # A 1x1x1 convolution gives the same answer whatever the orientation of the input:
+    # averaging over the mirrored inputs must give back the plain prediction.
+    torch.manual_seed(0)
+    model = torch.nn.Conv3d(1, 3, kernel_size=1).eval()
+    image = torch.randn(1, 1, 20, 18, 16)
+    plain = predict_volume(model, image, (8, 8, 8), torch.device("cpu"))
+    tta = predict_volume(model, image, (8, 8, 8), torch.device("cpu"), tta=True, mode="gaussian")
+    assert torch.allclose(plain, tta, atol=1e-5)
+    assert torch.allclose(tta.sum(dim=1), torch.ones(1, 20, 18, 16), atol=1e-5)
+
+
+def test_tta_flips_back_the_predictions():
+    # A model that is NOT flip-invariant (its output depends on the position along X):
+    # each flipped prediction must be flipped back before averaging.
+    class XRamp(torch.nn.Module):
+        def forward(self, x):
+            ramp = torch.linspace(-3, 3, x.shape[2]).view(1, 1, -1, 1, 1)
+            return torch.cat([ramp.expand_as(x), -ramp.expand_as(x)], dim=1)
+
+    image = torch.zeros(1, 1, 16, 8, 8)
+    plain = predict_volume(XRamp(), image, (16, 8, 8), torch.device("cpu"))
+    tta = predict_volume(XRamp(), image, (16, 8, 8), torch.device("cpu"), tta=True)
+    # Half of the mirrors flip X: the average is symmetric, i.e. 0.5 everywhere
+    assert torch.allclose(tta, torch.full_like(tta, 0.5), atol=1e-5)
+    assert not torch.allclose(plain, tta)
+
+
+def test_unknown_sliding_window_mode_raises():
+    with pytest.raises(ValueError):
+        predict_volume(torch.nn.Identity(), torch.zeros(1, 1, 8, 8, 8), (8, 8, 8), torch.device("cpu"), mode="x")
 
 
 # --- Training: checkpoints written during fit ---

@@ -42,7 +42,7 @@ Les expériences peuvent être trackées sur **Weights & Biases** (ou en CSV ave
 
 ## 📊 Expériences & Résultats
 
-Les modèles sont entraînés sur un jeu très restreint (24 images d'entraînement, 6 de validation par fold) pour observer leur comportement en régime "Low-Data". Toutes les métriques sont calculées sur **volumes entiers** (sliding window, recouvrement 50 %) et moyennées sur les 13 organes :
+Les modèles sont entraînés sur un jeu très restreint (24 images d'entraînement, 6 de validation par fold) pour observer leur comportement en régime "Low-Data". Toutes les métriques sont calculées sur **volumes entiers** (sliding window) et moyennées sur les 13 organes :
 * **Dice** : recouvrement volumique.
 * **HD95** en millimètres (spacing 1.5 × 1.5 × 2.0 mm) : 95e percentile de la distance entre les contours prédit et réel.
 * **NSD** (*Normalized Surface Distance*, tolérance 2 mm) : part du contour placée à moins de 2 mm du contour réel, recommandée par *Metrics Reloaded* pour les petites structures.
@@ -54,7 +54,10 @@ Les modèles sont entraînés sur un jeu très restreint (24 images d'entraînem
 | :--- | :--- | :--- | :--- | :--- |
 | U-Net baseline (4.8 M) | hold-out, 6 volumes | 0.439 | 336.5 | 0.315 |
 | U-Net, DiceCE + patchs par classe + cosinus, 250 epochs + post-traitement | CV 5 folds | 0.567 ± 0.018 | 133.2 ± 8.9 | 0.455 ± 0.010 |
-| idem + loss pondérée sur les petits organes (`--rare-loss-weight 5`) | **CV 5 folds** | **0.666 ± 0.027** | **23.7 ± 5.6** | **0.565 ± 0.026** |
+| idem + loss pondérée sur les petits organes (`--rare-loss-weight 5`) | CV 5 folds | 0.666 ± 0.027 | 23.7 ± 5.6 | 0.565 ± 0.026 |
+| idem + inférence gaussienne, recouvrement 75 % | **CV 5 folds** | **0.700 ± 0.030** | **21.8 ± 6.4** | **0.610 ± 0.030** |
+
+Les trois premières lignes utilisent l'inférence d'origine : patchs moyennés uniformément, avec 50 % de recouvrement.
 
 Organes manqués : 5 sur 13 pour la baseline (organes 4, 5, 10, 12 et 13), 2 sur 13 sans la loss pondérée (organes 12 et 13, sur les 5 folds), aucun avec.
 
@@ -72,10 +75,26 @@ Effet de la loss pondérée sur les petits organes (Dice moyen sur les 5 folds, 
 * **Post-traitement :** conservation de la plus grande composante connectée de chaque organe. Il supprime les fausses détections lointaines : mesuré sur la CV sans pondération, il divisait par plus de deux le HD95 des organes détectés, sans dégrader le Dice.
 * **Ce qui a vraiment fait la différence :** l'échantillonnage de patchs par classe (+16 points de Dice sur le fold 1), une durée d'entraînement suffisante (250 epochs, la courbe de Dice reste plate pendant ~60 epochs avant de décoller), puis la pondération de la loss.
 
+### Réglages de l'inférence (sans réentraînement)
+
+Mêmes modèles (meilleur checkpoint de chaque fold, loss pondérée), avec post-traitement ; un seul réglage changé à chaque ligne :
+
+| Inférence | Dice | HD95 (mm) | NSD | Temps (30 volumes) |
+| :--- | :--- | :--- | :--- | :--- |
+| Patchs moyennés uniformément, recouvrement 50 % | 0.666 ± 0.027 | 23.7 ± 5.6 | 0.565 ± 0.026 | ~20 min |
+| Pondération gaussienne, recouvrement 50 % | 0.692 ± 0.025 | 22.4 ± 5.5 | 0.598 ± 0.027 | ~20 min |
+| **Pondération gaussienne, recouvrement 75 %** (défaut) | **0.700 ± 0.030** | **21.8 ± 6.4** | **0.610 ± 0.030** | ~55 min |
+| idem + TTA par retournements (8 versions) | 0.085 ± 0.014 | 378.3 ± 18.9 | 0.040 ± 0.008 | ~6 h |
+
+* **Pondération gaussienne :** là où les patchs se chevauchent, le centre de chaque patch compte davantage que ses bords, où le réseau voit moins de contexte. C'est le gain le plus net : +2.6 points de Dice, sur les 5 folds.
+* **Recouvrement 75 % :** +0.8 point de Dice, sur les 5 folds également, pour un temps de calcul presque triplé (`--sw-overlap 0.5` reste disponible).
+* **TTA par retournements :** elle effondre les scores. Le modèle n'a jamais vu de scanner retourné à l'entraînement et l'anatomie abdominale n'est pas symétrique (foie à droite, rate à gauche). Sur un volume, chaque version retournée obtient un Dice de 0.01 à 0.19 contre 0.56 pour l'original, et la moyenne est dominée par ces 7 prédictions fausses. nnU-Net peut l'utiliser parce qu'il entraîne avec des retournements aléatoires. L'option `--tta` est conservée pour un futur modèle entraîné ainsi.
+
 ### ⚠️ Limites méthodologiques
 
 * **Réglages choisis sur le fold 1 :** l'échantillonnage, les poids de classes et la durée d'entraînement ont été réglés en regardant la validation du fold 1. Ses 6 volumes ont donc servi à la fois au réglage et à l'évaluation, et son score est optimiste. Les 4 autres folds n'ont pas servi au réglage : leur Dice moyen avec la loss pondérée (0.672) est proche de celui du fold 1 (0.640), ce qui suggère que ce biais reste faible.
 * **Sélection du checkpoint :** chaque fold est évalué avec son meilleur checkpoint (Dice maximal sur sa propre validation), ce qui biaise légèrement les scores à la hausse. Dans les entraînements ci-dessus, `last.ckpt` était une copie du meilleur checkpoint (comportement de `save_last` dans Lightning 2.x, corrigé depuis) : l'écart avec le dernier checkpoint n'a donc pas encore pu être mesuré. Les prochains entraînements permettront de le faire avec `evaluate.py --checkpoint-kind last`.
+* **Réglages d'inférence choisis sur la validation croisée :** la pondération gaussienne et le recouvrement ont été retenus en regardant les mêmes 30 volumes. Le biais est faible, car ce sont deux réglages standards et le gain apparaît sur chacun des 5 folds.
 * **Pas de jeu de test indépendant :** les 30 volumes annotés servent tous à la validation croisée ; les images de `imagesTs` n'ont pas d'annotation.
 
 ### Comparaison avec Swin UNETR
@@ -129,7 +148,7 @@ Ctrl+C arrête proprement à la fin de l'epoch ; la même commande avec `--resum
 python scripts/evaluate.py --cv --checkpoints-dir checkpoints/cv_classes_w5 --postprocess
 ```
 
-Ajouter `--checkpoint-kind last` pour évaluer le dernier checkpoint de chaque fold au lieu du meilleur.
+Ajouter `--checkpoint-kind last` pour évaluer le dernier checkpoint de chaque fold au lieu du meilleur. L'inférence utilise par défaut la pondération gaussienne avec 75 % de recouvrement (`--sw-mode`, `--sw-overlap` ; mêmes options dans `predict.py`).
 
 **Tests rapides (sans données ni GPU) :**
 
@@ -150,5 +169,6 @@ Conscient des limites matérielles de mon environnement local (4 Go de VRAM), j'
 
 * **Comparaison à nnU-Net** sur les mêmes folds, et **ensemble des 5 folds** pour l'inférence.
 * **Organes encore difficiles :** les organes 4, 11, 12 et 13 restent sous 0.5 de Dice en validation croisée.
-* **Augmentations de données** (déformation élastique, déjà écrite dans `transforms.py`) et patchs plus grands ou spacing plus fin.
+* **Augmentations de données** (déformation élastique, déjà écrite dans `transforms.py`) et patchs plus grands ou spacing plus fin. Des retournements aléatoires à l'entraînement rendraient la TTA utilisable, à condition de traiter les organes pairs (reins, surrénales) dont l'étiquette droite/gauche s'inverse.
+* **Post-traitement plus prudent :** avec 75 % de recouvrement, la rate du fold 3 recule (Dice 0.72 → 0.60), probablement parce qu'elle est prédite en deux morceaux dont un seul est conservé. Garder les composantes au-delà d'une taille minimale éviterait ce cas.
 * **Ré-entraînement cloud** (ex : AWS EC2 avec GPU A10G) pour des modèles plus gros, et pré-entraînement du Swin UNETR.

@@ -2,8 +2,8 @@
 Inference script to generate 3D segmentation masks on test images using a trained model.
 Automatically inverts spatial transforms to match the original patient anatomy.
 
-The inference follows the same rules as scripts/evaluate.py (sliding window with
-50 % overlap, AMP, optional post-processing).
+The inference is the one of scripts/evaluate.py (src/inference.py: sliding window,
+AMP, options --sw-overlap, --sw-mode, --tta; optional post-processing).
 
 Usage:
     python scripts/predict.py                                  # baseline U-Net, all test images
@@ -19,7 +19,6 @@ from pathlib import Path
 import torch
 
 # Importations spécifiques MONAI
-from monai.inferers import sliding_window_inference
 from monai.data import Dataset, DataLoader, decollate_batch
 from monai.transforms import (
     Compose, LoadImaged, EnsureChannelFirstd, Orientationd, Spacingd,
@@ -29,6 +28,7 @@ from monai.transforms import (
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
 
+from src.inference import add_inference_args, inference_settings, predict_volume
 from src.models.builder import get_model
 from src.postprocess import keep_largest_components
 
@@ -67,6 +67,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--postprocess", action="store_true",
                         help="Keep only the largest connected component of each organ.")
     parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "predictions")
+    add_inference_args(parser)
     return parser.parse_args()
 
 
@@ -155,20 +156,8 @@ def main():
                 inputs = batch_data["image"].to(device)
 
                 print("Running sliding window inference...")
-                # sw_device: patches on GPU; device: stitched output on CPU (4 GB of VRAM)
-                with torch.autocast(device_type=device.type, enabled=device.type == "cuda"):
-                    outputs = sliding_window_inference(
-                        inputs=inputs,
-                        roi_size=SPATIAL_SIZE,
-                        sw_batch_size=1,
-                        predictor=model,
-                        overlap=0.5,
-                        sw_device=device,
-                        device=torch.device("cpu"),
-                    )
-
-                # On stocke les probabilités prédites dans notre dictionnaire
-                batch_data["pred"] = outputs.float()
+                # Patches on GPU, stitched probabilities on CPU (4 GB of VRAM), see src/inference.py
+                batch_data["pred"] = predict_volume(model, inputs, SPATIAL_SIZE, device, **inference_settings(args))
 
                 # Decollate sépare le batch pour appliquer le post-traitement image par image
                 for i in decollate_batch(batch_data):

@@ -16,6 +16,9 @@ Two modes:
         python scripts/evaluate.py --cv
       --checkpoint-kind last evaluates last.ckpt (no checkpoint selection on the
       validation volumes) instead of the best-Dice checkpoint.
+
+Inference options (shared with predict.py, see src/inference.py): --sw-overlap,
+--sw-mode {constant,gaussian} and --tta (mirroring test-time augmentation).
 """
 
 import argparse
@@ -27,7 +30,6 @@ from pathlib import Path
 import numpy as np
 import torch
 from monai.data import DataLoader
-from monai.inferers import sliding_window_inference
 from monai.metrics import DiceMetric, HausdorffDistanceMetric, SurfaceDiceMetric
 from monai.transforms import AsDiscrete
 
@@ -37,6 +39,7 @@ sys.path.append(str(PROJECT_ROOT))
 from src.models.builder import get_model
 from src.data.dataset import get_data_dicts, get_dataset, get_kfold_splits, split_train_val
 from src.data.transforms import get_val_transforms
+from src.inference import add_inference_args, inference_settings, predict_volume
 from src.postprocess import keep_largest_components as keep_largest_components_np
 
 SPATIAL_SIZE = (96, 96, 96)
@@ -78,6 +81,7 @@ def parse_args() -> argparse.Namespace:
         "--postprocess", action="store_true",
         help="Keep only the largest connected component of each organ before computing the metrics.",
     )
+    add_inference_args(parser)
     return parser.parse_args()
 
 
@@ -133,7 +137,8 @@ def keep_largest_components(onehot: torch.Tensor) -> torch.Tensor:
 
 def evaluate_checkpoint(
     checkpoint: Path, model_name: str, val_files: list[dict], device: torch.device,
-    postprocess: bool = False, nsd_tolerance: float = 2.0
+    postprocess: bool = False, nsd_tolerance: float = 2.0,
+    inference: dict | None = None,
 ) -> dict:
     """
     Evaluates one checkpoint on full volumes.
@@ -142,6 +147,8 @@ def evaluate_checkpoint(
         postprocess: Keep only the largest connected component of each organ (see
             keep_largest_components) before computing the metrics.
         nsd_tolerance: Tolerance (mm) of the Normalized Surface Distance.
+        inference: Keyword arguments of src.inference.predict_volume (overlap, mode, tta);
+            None keeps its defaults.
 
     Returns:
         dict with per-patient arrays (patients x organs): "dice", "hd95", "nsd" (NaN where the
@@ -179,15 +186,11 @@ def evaluate_checkpoint(
             images = batch_data["image"].to(device)
             labels = batch_data["label"]
 
-            # sw_device: patches on GPU; device: stitched output on CPU
-            with torch.autocast(device_type=device.type, enabled=device.type == "cuda"):
-                outputs = sliding_window_inference(
-                    images, SPATIAL_SIZE, 1, model, overlap=0.5,
-                    sw_device=device, device=torch.device("cpu")
-                )
+            # Probabilities stitched on the CPU (see src/inference.py)
+            outputs = predict_volume(model, images, SPATIAL_SIZE, device, **(inference or {}))
 
             # One-hot masks as uint8 (4x smaller than float32)
-            val_outputs = torch.stack([post_pred(o) for o in outputs.float()]).to(torch.uint8)
+            val_outputs = torch.stack([post_pred(o) for o in outputs]).to(torch.uint8)
             del outputs
             if postprocess:
                 val_outputs = keep_largest_components(val_outputs)
@@ -301,7 +304,8 @@ def main():
     if not args.cv:
         _, val_files = split_train_val(data_dicts)
         result = evaluate_checkpoint(
-            args.checkpoint, args.model, val_files, device, args.postprocess, args.nsd_tolerance
+            args.checkpoint, args.model, val_files, device, args.postprocess, args.nsd_tolerance,
+            inference_settings(args),
         )
         summary = summarize_run(result)
         print_holdout(summary)
@@ -312,6 +316,7 @@ def main():
             "model": args.model,
             "postprocess": args.postprocess,
             "nsd_tolerance_mm": args.nsd_tolerance,
+            "inference": inference_settings(args),
             "num_patients": summary["num_patients"],
             "mean_dice": summary["mean_dice"],
             "mean_hd95": None if np.isnan(summary["mean_hd95"]) else summary["mean_hd95"],
@@ -332,7 +337,8 @@ def main():
             checkpoints.append(str(ckpt))
             _, val_files = splits[fold - 1]
             summaries.append(summarize_run(
-                evaluate_checkpoint(ckpt, args.model, val_files, device, args.postprocess, args.nsd_tolerance)
+                evaluate_checkpoint(ckpt, args.model, val_files, device, args.postprocess, args.nsd_tolerance,
+                                    inference_settings(args))
             ))
 
         stack = lambda key: np.stack([s[key] for s in summaries])  # noqa: E731
@@ -361,6 +367,7 @@ def main():
             "postprocess": args.postprocess,
             "checkpoint_kind": args.checkpoint_kind,
             "nsd_tolerance_mm": args.nsd_tolerance,
+            "inference": inference_settings(args),
             "folds": folds,
             "checkpoints": checkpoints,
             "mean_dice": {"mean": agg["mean_dice_mean"], "std": agg["mean_dice_std"]},
