@@ -81,6 +81,11 @@ def parse_args() -> argparse.Namespace:
         "--postprocess", action="store_true",
         help="Keep only the largest connected component of each organ before computing the metrics.",
     )
+    parser.add_argument(
+        "--min-component-ratio", type=float, default=1.0,
+        help="With --postprocess: also keep the components at least this fraction of the organ's "
+             "largest one (1.0 = largest only).",
+    )
     add_inference_args(parser)
     return parser.parse_args()
 
@@ -117,18 +122,22 @@ def find_fold_checkpoint(checkpoints_dir: Path, fold: int, kind: str = "best") -
     return candidates[-1]
 
 
-def keep_largest_components(onehot: torch.Tensor) -> torch.Tensor:
+def keep_largest_components(onehot: torch.Tensor, min_ratio: float = 1.0) -> torch.Tensor:
     """
-    Post-processing: for each organ keep only its largest connected component and
-    relabel the other islands as background (removes far-away false detections).
+    Post-processing: for each organ keep its largest connected component (and the
+    components at least min_ratio times as large) and relabel the other islands as
+    background (removes far-away false detections).
 
     Args:
         onehot: uint8 one-hot prediction of shape (1, NUM_CLASSES, X, Y, Z).
+        min_ratio: See src.postprocess.keep_largest_components.
 
     Returns:
         A one-hot uint8 tensor of the same shape.
     """
-    label_map = keep_largest_components_np(onehot[0].argmax(dim=0).numpy().astype(np.uint8), NUM_CLASSES)
+    label_map = keep_largest_components_np(
+        onehot[0].argmax(dim=0).numpy().astype(np.uint8), NUM_CLASSES, min_ratio
+    )
     cleaned = torch.zeros_like(onehot)
     for c in range(NUM_CLASSES):
         cleaned[0, c] = torch.from_numpy(label_map == c)
@@ -138,7 +147,7 @@ def keep_largest_components(onehot: torch.Tensor) -> torch.Tensor:
 def evaluate_checkpoint(
     checkpoint: Path, model_name: str, val_files: list[dict], device: torch.device,
     postprocess: bool = False, nsd_tolerance: float = 2.0,
-    inference: dict | None = None,
+    inference: dict | None = None, min_component_ratio: float = 1.0,
 ) -> dict:
     """
     Evaluates one checkpoint on full volumes.
@@ -146,6 +155,8 @@ def evaluate_checkpoint(
     Args:
         postprocess: Keep only the largest connected component of each organ (see
             keep_largest_components) before computing the metrics.
+        min_component_ratio: With postprocess, also keep the components at least this
+            fraction of the organ's largest one.
         nsd_tolerance: Tolerance (mm) of the Normalized Surface Distance.
         inference: Keyword arguments of src.inference.predict_volume (overlap, mode, tta);
             None keeps its defaults.
@@ -193,7 +204,7 @@ def evaluate_checkpoint(
             val_outputs = torch.stack([post_pred(o) for o in outputs]).to(torch.uint8)
             del outputs
             if postprocess:
-                val_outputs = keep_largest_components(val_outputs)
+                val_outputs = keep_largest_components(val_outputs, min_component_ratio)
             val_labels = torch.stack([post_label(l) for l in labels]).to(torch.uint8)
 
             label_present = val_labels[0, 1:].flatten(1).sum(dim=1).numpy() > 0
@@ -305,7 +316,7 @@ def main():
         _, val_files = split_train_val(data_dicts)
         result = evaluate_checkpoint(
             args.checkpoint, args.model, val_files, device, args.postprocess, args.nsd_tolerance,
-            inference_settings(args),
+            inference_settings(args), args.min_component_ratio,
         )
         summary = summarize_run(result)
         print_holdout(summary)
@@ -315,6 +326,7 @@ def main():
             "checkpoint": str(args.checkpoint),
             "model": args.model,
             "postprocess": args.postprocess,
+            "min_component_ratio": args.min_component_ratio,
             "nsd_tolerance_mm": args.nsd_tolerance,
             "inference": inference_settings(args),
             "num_patients": summary["num_patients"],
@@ -338,7 +350,7 @@ def main():
             _, val_files = splits[fold - 1]
             summaries.append(summarize_run(
                 evaluate_checkpoint(ckpt, args.model, val_files, device, args.postprocess, args.nsd_tolerance,
-                                    inference_settings(args))
+                                    inference_settings(args), args.min_component_ratio)
             ))
 
         stack = lambda key: np.stack([s[key] for s in summaries])  # noqa: E731
@@ -365,6 +377,7 @@ def main():
         payload = {
             "model": args.model,
             "postprocess": args.postprocess,
+            "min_component_ratio": args.min_component_ratio,
             "checkpoint_kind": args.checkpoint_kind,
             "nsd_tolerance_mm": args.nsd_tolerance,
             "inference": inference_settings(args),

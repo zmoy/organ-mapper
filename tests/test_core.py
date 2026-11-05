@@ -65,6 +65,20 @@ def test_keep_largest_components_keeps_single_components_untouched():
     assert np.array_equal(keep_largest_components(label_map.copy(), NUM_CLASSES), label_map)
 
 
+def test_min_ratio_keeps_large_pieces_and_drops_small_islands():
+    label_map = np.zeros((30, 30, 30), dtype=np.uint8)
+    label_map[1:11, 1:11, 1:11] = 1      # organ 1: largest piece (1000 voxels)
+    label_map[15:21, 15:21, 15:21] = 1   # second piece, 216 voxels = 21.6 % -> kept with 0.1
+    label_map[25:27, 25:27, 25:27] = 1   # island, 8 voxels = 0.8 % -> removed
+
+    only_largest = keep_largest_components(label_map.copy(), NUM_CLASSES)
+    relaxed = keep_largest_components(label_map.copy(), NUM_CLASSES, min_ratio=0.1)
+
+    assert (only_largest == 1).sum() == 1000
+    assert (relaxed == 1).sum() == 1000 + 216
+    assert (relaxed[25:27, 25:27, 25:27] == 0).all()
+
+
 # --- K-fold split ---
 
 def _fake_dicts(n: int = 30) -> list[dict]:
