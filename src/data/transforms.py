@@ -20,6 +20,9 @@ from monai.transforms import (
     CropForegroundd,
     ResizeWithPadOrCropd,
     RandShiftIntensityd,
+    RandScaleIntensityd,
+    RandAdjustContrastd,
+    RandGaussianSmoothd,
 )
 
 NUM_CLASSES = 14  # 13 organs + background; keep in sync with get_model / OrganMapperModule
@@ -44,7 +47,8 @@ def get_train_transforms(
     num_samples: int = 1,
     intensity_shift: bool = True,
     sampling: str = "posneg",
-    rare_weight: float = 3.0
+    rare_weight: float = 3.0,
+    augmentation: str = "light",
 ) -> Compose:
     """
     Builds the MONAI transform pipeline for training.
@@ -61,12 +65,14 @@ def get_train_transforms(
             (see get_class_ratios), then a voxel of that class.
         rare_weight: With sampling="classes", sampling weight of the RARE_CLASSES
             relative to the other organs (weight 1).
+        augmentation: Random transforms applied to the patches (see get_augmentations):
+            "light" (the original pipeline) or "strong" (nnU-Net-like ranges).
 
     Returns:
         Compose: The composed MONAI transforms pipeline.
     """
 
-    shift = [RandShiftIntensityd(keys=["image"], offsets=0.1, prob=0.5)] if intensity_shift else []
+    augmentations = get_augmentations(augmentation, spatial_size, intensity_shift)
 
     if sampling == "classes":
         # The class indices are deterministic, so they land in the on-disk cache
@@ -135,33 +141,75 @@ def get_train_transforms(
         # --- 3. Patch Extraction ---
         *crop,
 
-        # --- 4. Data Augmentation (Optional but recommended) ---
-        # Slight rotations and translations to prevent overfitting
-        RandAffined(
-            keys=['image', 'label'],
-            mode=('bilinear', 'nearest'),
-            prob=0.5,
-            spatial_size=spatial_size,
-            rotate_range=(0.1, 0.1, 0.1), # slight rotation
-            scale_range=(0.1, 0.1, 0.1)   # slight scaling
-        ),
-        # Elastic deformation (simulates soft tissue and breathing motion)
-        # Rand3DElasticd(
-        #     keys=["image", "label"],
-        #     mode=("bilinear", "nearest"),
-        #     prob=0.2,
-        #     sigma_range=(5, 7),
-        #     magnitude_range=(50, 150)
-        # ),
-
-        # --- 5. Data Augmentation (Intensity) ---
-        # Intensity offset (simulates variations in scanner calibration)
-        *shift,
-        # Add slight noise to the image only
-        RandGaussianNoised(keys=['image'], prob=0.1, mean=0.0, std=0.1)
+        # --- 4. Data Augmentation (on the patches) ---
+        *augmentations,
     ])
-    
+
     return transforms
+
+
+def get_augmentations(
+    level: str = "light",
+    spatial_size: tuple[int, int, int] = (96, 96, 96),
+    intensity_shift: bool = True,
+) -> list:
+    """
+    Random transforms applied to the training patches.
+
+    No random flip: abdominal anatomy is not symmetric and some labels are
+    side-specific (kidneys 2/3, adrenal glands 12/13), so a left-right flip
+    would need to swap them. No elastic deformation either: it is slow on the CPU
+    and the data loading runs in the main process (num_workers=0 on Windows).
+
+    Args:
+        level: "light": the original pipeline (rotation ~6 deg and scaling +/-10 %
+            half of the time, intensity offset, rare Gaussian noise). "strong":
+            nnU-Net-like ranges (rotation +/-15 deg, scaling +/-15 %, noise, blur,
+            brightness and gamma contrast).
+        spatial_size: Patch size (output size of the affine transform).
+        intensity_shift: Whether to apply RandShiftIntensityd.
+
+    Returns:
+        A list of MONAI dictionary transforms.
+    """
+    shift = [RandShiftIntensityd(keys=["image"], offsets=0.1, prob=0.5)] if intensity_shift else []
+    if level == "light":
+        return [
+            # Slight rotations and scaling
+            RandAffined(
+                keys=["image", "label"],
+                mode=("bilinear", "nearest"),
+                prob=0.5,
+                spatial_size=spatial_size,
+                rotate_range=(0.1, 0.1, 0.1),
+                scale_range=(0.1, 0.1, 0.1),
+            ),
+            # Intensity offset (simulates variations in scanner calibration)
+            *shift,
+            RandGaussianNoised(keys=["image"], prob=0.1, mean=0.0, std=0.1),
+        ]
+    if level == "strong":
+        return [
+            # Patient positioning and body size
+            RandAffined(
+                keys=["image", "label"],
+                mode=("bilinear", "nearest"),
+                prob=0.5,
+                spatial_size=spatial_size,
+                rotate_range=(0.26, 0.26, 0.26),  # +/- 15 degrees
+                scale_range=(0.15, 0.15, 0.15),
+                padding_mode="zeros",
+            ),
+            # Acquisition noise and resolution (image only, the label is never blurred)
+            RandGaussianNoised(keys=["image"], prob=0.15, mean=0.0, std=0.05),
+            RandGaussianSmoothd(keys=["image"], prob=0.2, sigma_x=(0.5, 1.0), sigma_y=(0.5, 1.0),
+                                sigma_z=(0.5, 1.0)),
+            # Scanner calibration and contrast injection timing
+            RandScaleIntensityd(keys=["image"], factors=0.25, prob=0.15),
+            *shift,
+            RandAdjustContrastd(keys=["image"], gamma=(0.7, 1.5), prob=0.3),
+        ]
+    raise ValueError(f"Unknown augmentation level '{level}'. Choose 'light' or 'strong'.")
 
 def get_val_transforms(
     spacing: tuple[float, float, float] = (1.5, 1.5, 2.0),

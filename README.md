@@ -4,6 +4,7 @@
 ![PyTorch Lightning](https://img.shields.io/badge/pytorch--lightning-792EE5?style=for-the-badge&logo=pytorchlightning&logoColor=white)
 ![Weights & Biases](https://img.shields.io/badge/Weights_&_Biases-FFBE00?style=for-the-badge&logo=WeightsAndBiases&logoColor=white)
 ![MONAI](https://img.shields.io/badge/MONAI-Medical_AI-blue?style=for-the-badge)
+[![tests](https://github.com/zmoy/organ-mapper/actions/workflows/tests.yml/badge.svg)](https://github.com/zmoy/organ-mapper/actions/workflows/tests.yml)
 
 ## 📌 Contexte Clinique
 La segmentation automatique des organes sur des scanners 3D (CT scans) est un enjeu majeur en imagerie médicale. Elle permet de :
@@ -55,11 +56,25 @@ Les modèles sont entraînés sur un jeu très restreint (24 images d'entraînem
 | U-Net baseline (4.8 M) | hold-out, 6 volumes | 0.439 | 336.5 | 0.315 |
 | U-Net, DiceCE + patchs par classe + cosinus, 250 epochs + post-traitement | CV 5 folds | 0.567 ± 0.018 | 133.2 ± 8.9 | 0.455 ± 0.010 |
 | idem + loss pondérée sur les petits organes (`--rare-loss-weight 5`) | CV 5 folds | 0.666 ± 0.027 | 23.7 ± 5.6 | 0.565 ± 0.026 |
-| idem + inférence gaussienne, recouvrement 75 % | **CV 5 folds** | **0.700 ± 0.030** | **21.8 ± 6.4** | **0.610 ± 0.030** |
+| idem + inférence gaussienne, recouvrement 75 % | CV 5 folds | 0.700 ± 0.030 | 21.8 ± 6.4 | 0.610 ± 0.030 |
+| idem + augmentations fortes (`--augmentation strong`) | **CV 5 folds** | **0.719 ± 0.022** | **19.3 ± 4.6** | **0.630 ± 0.021** |
 
 Les trois premières lignes utilisent l'inférence d'origine : patchs moyennés uniformément, avec 50 % de recouvrement.
 
-Organes manqués : 5 sur 13 pour la baseline (organes 4, 5, 10, 12 et 13), 2 sur 13 sans la loss pondérée (organes 12 et 13, sur les 5 folds), aucun avec.
+Organes manqués : 5 sur 13 pour la baseline (organes 4, 5, 10, 12 et 13), 2 sur 13 sans la loss pondérée (organes 12 et 13, sur les 5 folds), aucun avec. Avec les augmentations fortes, la surrénale gauche (organe 13) est manquée sur un seul volume du fold 1 avec le meilleur checkpoint, et sur aucun avec le dernier.
+
+Effet des augmentations fortes (rotations ±15°, mise à l'échelle ±15 %, bruit, flou, luminosité, contraste gamma, sans retournement), un seul paramètre changé :
+
+| Fold | Dice sans → avec | HD95 (mm) sans → avec | NSD sans → avec |
+| :--- | :--- | :--- | :--- |
+| 1 | 0.678 → 0.694 | 24.5 → 27.3 | 0.589 → 0.608 |
+| 2 | 0.730 → 0.742 | 17.5 → 17.9 | 0.624 → 0.642 |
+| 3 | 0.669 → 0.709 | 31.9 → 17.2 | 0.576 → 0.612 |
+| 4 | 0.733 → 0.741 | 16.6 → 16.0 | 0.652 → 0.658 |
+| 5 | 0.690 → 0.707 | 18.4 → 17.8 | 0.609 → 0.628 |
+
+* **Le Dice et le NSD progressent sur les 5 folds** (+1.9 et +2.0 points en moyenne), et l'écart-type entre folds diminue. Les gains les plus nets concernent la rate (0.80 → 0.86, qui ne se fragmente plus sur le fold 3), la vésicule (0.52 → 0.56), la veine porte (0.60 → 0.63), le pancréas (0.57 → 0.61) et l'estomac (0.71 → 0.73).
+* **HD95 :** il baisse en moyenne (21.8 → 19.3 mm), surtout grâce au fold 3. Sur le fold 1, la surrénale gauche manquée sur un volume pèse lourd (HD95 de l'organe 13 : 140 mm sur ce fold).
 
 Effet de la loss pondérée sur les petits organes (Dice moyen sur les 5 folds, avec post-traitement) :
 
@@ -93,7 +108,7 @@ Mêmes modèles (meilleur checkpoint de chaque fold, loss pondérée), avec post
 ### ⚠️ Limites méthodologiques
 
 * **Réglages choisis sur le fold 1 :** l'échantillonnage, les poids de classes et la durée d'entraînement ont été réglés en regardant la validation du fold 1. Ses 6 volumes ont donc servi à la fois au réglage et à l'évaluation, et son score est optimiste. Les 4 autres folds n'ont pas servi au réglage : leur Dice moyen avec la loss pondérée (0.672) est proche de celui du fold 1 (0.640), ce qui suggère que ce biais reste faible.
-* **Sélection du checkpoint :** chaque fold est évalué avec son meilleur checkpoint (Dice maximal sur sa propre validation), ce qui biaise légèrement les scores à la hausse. Dans les entraînements ci-dessus, `last.ckpt` était une copie du meilleur checkpoint (comportement de `save_last` dans Lightning 2.x, corrigé depuis) : l'écart avec le dernier checkpoint n'a donc pas encore pu être mesuré. Les prochains entraînements permettront de le faire avec `evaluate.py --checkpoint-kind last`.
+* **Sélection du checkpoint :** chaque fold est évalué avec son meilleur checkpoint (Dice maximal sur sa propre validation), ce qui biaise légèrement les scores à la hausse. Mesuré sur l'entraînement avec augmentations fortes (`evaluate.py --checkpoint-kind last`), le biais est faible : le dernier checkpoint (epoch 250, sans sélection) obtient 0.715 ± 0.025 de Dice, 19.2 ± 3.3 mm de HD95 et 0.629 ± 0.024 de NSD, contre 0.719 / 19.3 / 0.630 pour le meilleur. Pour les entraînements précédents, `last.ckpt` était une copie du meilleur checkpoint (comportement de `save_last` dans Lightning 2.x, corrigé depuis) et l'écart n'a pas pu être mesuré.
 * **Réglages d'inférence choisis sur la validation croisée :** la pondération gaussienne et le recouvrement ont été retenus en regardant les mêmes 30 volumes. Le biais est faible, car ce sont deux réglages standards et le gain apparaît sur chacun des 5 folds.
 * **Pas de jeu de test indépendant :** les 30 volumes annotés servent tous à la validation croisée ; les images de `imagesTs` n'ont pas d'annotation.
 
@@ -137,7 +152,7 @@ pip install -r requirements.txt
 Tous les réglages (modèle, loss, patchs, scheduler...) se passent en ligne de commande (`python scripts/train.py --help`). Configuration de référence, en validation croisée 5 folds :
 
 ```bash
-python scripts/train_cv.py --run-name cv_classes_w5 --logger csv --max-epochs 250   --lr-scheduler cosine --warmup-epochs 5 --loss dicece --num-samples 4 --batch-size 2   --sampling classes --rare-weight 3 --rare-loss-weight 5
+python scripts/train_cv.py --run-name cv_classes_w5_aug --logger csv --max-epochs 250   --lr-scheduler cosine --warmup-epochs 5 --loss dicece --num-samples 4 --batch-size 2   --sampling classes --rare-weight 3 --rare-loss-weight 5 --augmentation strong
 ```
 
 Ctrl+C arrête proprement à la fin de l'epoch ; la même commande avec `--resume` reprend l'entraînement.
@@ -156,6 +171,8 @@ Ajouter `--checkpoint-kind last` pour évaluer le dernier checkpoint de chaque f
 pytest tests/test_core.py
 ```
 
+Ils tournent aussi automatiquement sur GitHub Actions à chaque push sur `main` et à chaque pull request (`.github/workflows/tests.yml`, PyTorch en version CPU via `requirements-ci.txt`).
+
 **4. Lancement de l'inférence :**
 Génère les volumes .nii.gz prédits (par défaut sur toutes les images de `imagesTs`) à partir du checkpoint de votre choix.
 
@@ -163,12 +180,21 @@ Génère les volumes .nii.gz prédits (par défaut sur toutes les images de `ima
 python scripts/predict.py --checkpoint checkpoints/cv_classes_w5/fold_1/<checkpoint>.ckpt --postprocess
 ```
 
+**5. Visualisation d'une prédiction :**
+Figure scanner / annotation / prédiction sur deux coupes axiales et une coupe coronale, en convention radiologique, avec le Dice de chaque organe. L'annotation est facultative (images de `imagesTs`).
+
+```bash
+python scripts/visualize.py --image data/raw/imagesTr/img0007.nii.gz --label data/raw/labelsTr/label0007.nii.gz --prediction predictions/img0007_preds.nii.gz
+```
+
+Pour une exploration en 3D, ouvrir le scanner dans ITK-SNAP (File > Open Main Image) puis la prédiction (Segmentation > Open Segmentation).
+
 ## Contraintes Actuelles & Perspectives d'Amélioration
 
 Conscient des limites matérielles de mon environnement local (4 Go de VRAM), j'ai implémenté l'architecture et les pipelines MLOps sur ma machine. Les pistes restantes :
 
 * **Comparaison à nnU-Net** sur les mêmes folds, et **ensemble des 5 folds** pour l'inférence.
 * **Organes encore difficiles :** les organes 4, 11, 12 et 13 restent sous 0.5 de Dice en validation croisée.
-* **Augmentations de données** (déformation élastique, déjà écrite dans `transforms.py`) et patchs plus grands ou spacing plus fin. Des retournements aléatoires à l'entraînement rendraient la TTA utilisable, à condition de traiter les organes pairs (reins, surrénales) dont l'étiquette droite/gauche s'inverse.
+* **Augmentations :** les augmentations fortes (`--augmentation strong`) sont retenues (+1.9 point de Dice). Pistes suivantes : déformations élastiques (lentes sans workers parallèles), patchs plus grands ou spacing plus fin. Des retournements aléatoires à l'entraînement rendraient la TTA utilisable, à condition de traiter les organes pairs (reins, surrénales) dont l'étiquette droite/gauche s'inverse.
 * **Post-traitement plus fin :** garder aussi les morceaux d'au moins 10 % du plus gros (`--min-component-ratio 0.1`) n'a pas été retenu. La rate du fold 3 remonte (Dice 0.60 → 0.74), mais les fausses détections conservées dégradent le HD95 moyen (21.8 → 33.6 mm) pour un Dice inchangé (0.700 → 0.702). Une règle tenant compte de la distance au plus gros morceau, ou de la position anatomique, reste à essayer.
 * **Ré-entraînement cloud** (ex : AWS EC2 avec GPU A10G) pour des modèles plus gros, et pré-entraînement du Swin UNETR.

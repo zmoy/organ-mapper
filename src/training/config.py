@@ -30,6 +30,7 @@ class TrainConfig:
     sampling: str = "posneg"           # posneg | classes (class-balanced patch centers)
     rare_weight: float = 3.0           # sampling weight of the rare organs when sampling="classes"
     rare_loss_weight: float = 1.0      # loss weight of the rare organs (dicece only); 1 = unweighted
+    augmentation: str = "light"        # light | strong (see src/data/transforms.get_augmentations)
     logger: str = "wandb"              # wandb | csv
     run_name: str | None = None
     fast_dev_run: bool = False
@@ -57,6 +58,7 @@ class TrainConfig:
             sampling=args.sampling,
             rare_weight=args.rare_weight,
             rare_loss_weight=args.rare_loss_weight,
+            augmentation=args.augmentation,
             logger=args.logger,
             run_name=args.run_name,
             fast_dev_run=args.fast_dev_run,
@@ -84,6 +86,8 @@ def add_train_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
                         help="With --sampling classes: weight of the rare organs (others = 1, background = 2).")
     parser.add_argument("--rare-loss-weight", type=float, default=d.rare_loss_weight,
                         help="Weight of the rare organs in the DiceCE loss (others = 1; 1 = no weighting).")
+    parser.add_argument("--augmentation", default=d.augmentation, choices=["light", "strong"],
+                        help="Patch augmentations: light (original) or strong (nnU-Net-like ranges, no flip).")
     parser.add_argument("--logger", default=d.logger, choices=["wandb", "csv"],
                         help="csv writes to results/logs (no W&B account needed).")
     parser.add_argument("--run-name", default=None, help="Default: <model>_<loss>.")

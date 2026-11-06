@@ -27,7 +27,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data.dataset import get_kfold_splits
-from src.data.transforms import NUM_CLASSES, RARE_CLASSES, get_class_ratios, get_train_transforms
+from src.data.transforms import (
+    NUM_CLASSES, RARE_CLASSES, get_augmentations, get_class_ratios, get_train_transforms,
+)
 from monai.inferers import sliding_window_inference
 
 from src.inference import MIRROR_AXES, predict_volume
@@ -158,6 +160,35 @@ def test_unknown_sampling_raises():
         get_train_transforms(sampling="unknown")
 
 
+def test_strong_augmentation_keeps_integer_labels_and_patch_size(synthetic_volume):
+    transforms = get_train_transforms(spatial_size=(16, 16, 16), num_samples=4, sampling="classes",
+                                      augmentation="strong")
+    transforms.set_random_state(seed=0)
+    for _ in range(5):
+        for patch in transforms(synthetic_volume):
+            assert tuple(patch["image"].shape) == (1, 16, 16, 16)
+            labels = patch["label"].unique()
+            # Nearest-neighbour resampling: only the original label values, never interpolated ones
+            assert set(labels.tolist()) <= {0.0, 6.0, 12.0}
+
+
+def test_light_augmentation_is_the_original_pipeline():
+    names = [type(t).__name__ for t in get_augmentations("light")]
+    assert names == ["RandAffined", "RandShiftIntensityd", "RandGaussianNoised"]
+    assert "RandShiftIntensityd" not in [type(t).__name__ for t in get_augmentations("light", intensity_shift=False)]
+
+
+def test_no_augmentation_flips_the_patches():
+    # Left-right flips would swap the side-specific labels (kidneys, adrenal glands)
+    for level in ("light", "strong"):
+        assert not any("Flip" in type(t).__name__ for t in get_augmentations(level))
+
+
+def test_unknown_augmentation_raises():
+    with pytest.raises(ValueError):
+        get_augmentations("unknown")
+
+
 # --- Loss ---
 
 def test_build_loss_without_weights():
@@ -247,6 +278,33 @@ def test_tta_flips_back_the_predictions():
 def test_unknown_sliding_window_mode_raises():
     with pytest.raises(ValueError):
         predict_volume(torch.nn.Identity(), torch.zeros(1, 1, 8, 8, 8), (8, 8, 8), torch.device("cpu"), mode="x")
+
+
+# --- Visualization ---
+
+def test_visualize_dice_per_organ():
+    visualize = _load_script("visualize")
+    gt = np.zeros((10, 10, 10), dtype=np.uint8)
+    pred = np.zeros_like(gt)
+    gt[0:4, 0:4, 0:4] = 1
+    pred[0:4, 0:4, 0:2] = 1   # half of organ 1 -> Dice 2*32/(64+32)
+    gt[6:8, 6:8, 6:8] = 12    # organ 12 missed
+    scores = visualize.dice_per_organ(gt, pred)
+    assert set(scores) == {1, 12}
+    assert scores[1] == pytest.approx(64 / 96)
+    assert scores[12] == 0.0
+
+
+def test_visualize_choose_slices():
+    visualize = _load_script("visualize")
+    label = np.zeros((10, 12, 20), dtype=np.uint8)
+    label[2:5, 3:6, 4] = 1
+    label[6:8, 3:6, 4] = 2           # z=4: two organs -> most organs
+    label[2:4, 8:10, 10:15] = 4      # focus organ 4 spans z=10..14 -> middle 12
+    z1, z2, y = visualize.choose_slices(label, focus_organ=4)
+    assert (z1, z2) == (4, 12)
+    assert 3 <= y <= 9
+    assert visualize.choose_slices(label, focus_organ=7)[1] == z1  # absent organ: falls back to z1
 
 
 # --- Training: checkpoints written during fit ---

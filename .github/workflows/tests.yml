@@ -1,0 +1,26 @@
+# Runs the fast unit tests (no data, no GPU) on every push and pull request.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test-core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+
+      - name: Install dependencies (CPU-only PyTorch)
+        run: pip install -r requirements-ci.txt
+
+      - name: Run the fast tests
+        run: pytest tests/test_core.py -q
