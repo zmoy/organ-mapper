@@ -16,7 +16,7 @@ from torch.optim import AdamW
 
 from src.data.transforms import NUM_CLASSES, RARE_CLASSES, get_train_transforms, get_val_transforms
 from src.models.builder import get_model
-from src.training.callbacks import GracefulStop
+from src.training.callbacks import DiskSpaceGuard, GracefulStop, LowDiskSpaceError
 from src.training.config import TrainConfig
 from src.training.lightning_module import OrganMapperModule
 
@@ -142,6 +142,7 @@ def build_trainer(
             *build_checkpoint_callbacks(run_name, ckpt_dir),
             LearningRateMonitor(logging_interval="epoch"),
             GracefulStop(Path(ckpt_dir) / "STOP"),
+            DiskSpaceGuard(ckpt_dir, cfg.min_free_gb),
         ],
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices=1,
@@ -172,6 +173,11 @@ def fit_with_resume(
         True if all epochs were run (a DONE marker is then written in ckpt_dir),
         False if the training was stopped early (Ctrl+C or STOP file); relaunch
         the same command with --resume to continue it.
+
+    Raises:
+        LowDiskSpaceError: The DiskSpaceGuard callback stopped the training (or
+            refused to start it) because the disk is nearly full. The script
+            then exits with an error code instead of looking successful.
     """
     ckpt_dir = Path(ckpt_dir)
     last = ckpt_dir / "last.ckpt"
@@ -182,6 +188,13 @@ def fit_with_resume(
         print(f"Resuming from {last}" if ckpt_path else f"No {last.name} in {ckpt_dir}: starting from scratch.")
 
     trainer.fit(model=module, train_dataloaders=train_loader, val_dataloaders=val_loader, ckpt_path=ckpt_path)
+
+    guard = next((c for c in trainer.callbacks if isinstance(c, DiskSpaceGuard)), None)
+    if guard is not None and guard.triggered and trainer.current_epoch < trainer.max_epochs:
+        raise LowDiskSpaceError(
+            f"Training stopped at epoch {trainer.current_epoch} for lack of disk space "
+            f"({ckpt_dir / 'last.ckpt'} is valid): free some space, then relaunch with --resume."
+        )
 
     stopper = next(c for c in trainer.callbacks if isinstance(c, GracefulStop))
     finished = not stopper.requested or trainer.current_epoch >= trainer.max_epochs

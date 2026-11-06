@@ -149,13 +149,17 @@ pip install -r requirements.txt
 ```
 
 **2. Lancement de l'entraînement :**
-Tous les réglages (modèle, loss, patchs, scheduler...) se passent en ligne de commande (`python scripts/train.py --help`). Configuration de référence, en validation croisée 5 folds :
+Tous les réglages (modèle, loss, patchs, scheduler...) se passent en ligne de commande (`python scripts/train.py --help`). Les valeurs par défaut sont celles de la configuration de référence, en validation croisée 5 folds :
 
 ```bash
+python scripts/train_cv.py --run-name <nom> --logger csv
+# équivalent explicite (run cv_classes_w5_aug) :
 python scripts/train_cv.py --run-name cv_classes_w5_aug --logger csv --max-epochs 250   --lr-scheduler cosine --warmup-epochs 5 --loss dicece --num-samples 4 --batch-size 2   --sampling classes --rare-weight 3 --rare-loss-weight 5 --augmentation strong
 ```
 
-Ctrl+C arrête proprement à la fin de l'epoch ; la même commande avec `--resume` reprend l'entraînement.
+Les réglages des essais antérieurs se retrouvent avec les options (docstring de `src/training/config.py`).
+
+Ctrl+C arrête proprement à la fin de l'epoch ; la même commande avec `--resume` reprend l'entraînement. Si l'espace libre du disque passe sous 2 Go (`--min-free-gb`), l'entraînement refuse de démarrer, ou s'arrête proprement en fin d'epoch avec un code d'erreur : il suffit de libérer de la place puis de relancer avec `--resume`.
 
 **3. Évaluation en volume entier (Dice, HD95 en mm, NSD) :**
 

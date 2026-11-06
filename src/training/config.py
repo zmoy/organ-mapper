@@ -2,9 +2,12 @@
 Training configuration shared by scripts/train.py and scripts/train_cv.py.
 Every field can be overridden from the command line.
 
-The defaults are the Phase 1 settings. The original train.py settings can be
-reproduced with:
-    --loss gdl --num-samples 1 --accumulate 8 --lr-scheduler none
+The defaults are the reference configuration of the README (run cv_classes_w5_aug).
+Earlier settings can be reproduced with:
+    Phase 1 defaults:        --batch-size 1 --max-epochs 100 --sampling posneg
+                             --rare-loss-weight 1 --augmentation light
+    original train.py:       the Phase 1 defaults + --loss gdl --num-samples 1
+                             --accumulate 8 --lr-scheduler none
 """
 
 import argparse
@@ -16,21 +19,22 @@ class TrainConfig:
     model_name: str = "unet"           # unet | swin_unetr
     loss: str = "dicece"               # gdl | dicece
     spatial_size: tuple[int, int, int] = (96, 96, 96)
-    batch_size: int = 1                # volumes per step
+    batch_size: int = 2                # volumes per step (2 x 4 patches of 96^3 fit in 4 GB of VRAM)
     num_samples: int = 4               # patches drawn per volume (effective batch = batch_size * num_samples)
     accumulate_grad_batches: int = 1
     lr: float = 1e-4
     weight_decay: float = 1e-5
     lr_scheduler: str = "cosine"       # none | cosine
     warmup_epochs: int = 5
-    max_epochs: int = 100
+    max_epochs: int = 250
     precision: str = "16-mixed"
     seed: int = 42
     intensity_shift: bool = True       # RandShiftIntensityd augmentation (the baseline had none)
-    sampling: str = "posneg"           # posneg | classes (class-balanced patch centers)
+    sampling: str = "classes"          # posneg | classes (class-balanced patch centers)
     rare_weight: float = 3.0           # sampling weight of the rare organs when sampling="classes"
-    rare_loss_weight: float = 1.0      # loss weight of the rare organs (dicece only); 1 = unweighted
-    augmentation: str = "light"        # light | strong (see src/data/transforms.get_augmentations)
+    rare_loss_weight: float = 5.0      # loss weight of the rare organs (dicece only); 1 = unweighted
+    augmentation: str = "strong"       # light | strong (see src/data/transforms.get_augmentations)
+    min_free_gb: float = 2.0           # stop cleanly below this free disk space (see DiskSpaceGuard)
     logger: str = "wandb"              # wandb | csv
     run_name: str | None = None
     fast_dev_run: bool = False
@@ -59,6 +63,7 @@ class TrainConfig:
             rare_weight=args.rare_weight,
             rare_loss_weight=args.rare_loss_weight,
             augmentation=args.augmentation,
+            min_free_gb=args.min_free_gb,
             logger=args.logger,
             run_name=args.run_name,
             fast_dev_run=args.fast_dev_run,
@@ -88,6 +93,9 @@ def add_train_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
                         help="Weight of the rare organs in the DiceCE loss (others = 1; 1 = no weighting).")
     parser.add_argument("--augmentation", default=d.augmentation, choices=["light", "strong"],
                         help="Patch augmentations: light (original) or strong (nnU-Net-like ranges, no flip).")
+    parser.add_argument("--min-free-gb", type=float, default=d.min_free_gb,
+                        help="Free disk space (GB) below which the training refuses to start, or stops "
+                             "cleanly at the end of the epoch (resumable with --resume) and exits with an error.")
     parser.add_argument("--logger", default=d.logger, choices=["wandb", "csv"],
                         help="csv writes to results/logs (no W&B account needed).")
     parser.add_argument("--run-name", default=None, help="Default: <model>_<loss>.")

@@ -12,6 +12,7 @@ Run with:
     pytest tests/test_core.py
 """
 
+import argparse
 import importlib.util
 import sys
 from pathlib import Path
@@ -34,7 +35,10 @@ from monai.inferers import sliding_window_inference
 
 from src.inference import MIRROR_AXES, predict_volume
 from src.postprocess import keep_largest_components
-from src.training.factory import build_checkpoint_callbacks, build_loss
+import src.training.callbacks as callbacks_module
+from src.training.callbacks import DiskSpaceGuard, GracefulStop, LowDiskSpaceError, free_space_gb
+from src.training.config import TrainConfig, add_train_args
+from src.training.factory import build_checkpoint_callbacks, build_loss, fit_with_resume
 
 
 def _load_script(name: str):
@@ -337,3 +341,58 @@ def test_last_checkpoint_follows_the_last_epoch_not_the_best(tmp_path):
     best = [p for p in tmp_path.glob("*.ckpt") if p.name != "last.ckpt"]
     assert [p.name for p in best] == ["run-epoch00-dice1.00.ckpt"]
     assert torch.load(tmp_path / "last.ckpt", weights_only=False)["epoch"] == 2
+
+
+# --- Training: disk space guard and default configuration ---
+
+def _guarded_trainer(ckpt_dir, max_epochs=3):
+    callbacks = [*build_checkpoint_callbacks("run", ckpt_dir), GracefulStop(ckpt_dir / "STOP"),
+                 DiskSpaceGuard(ckpt_dir, min_free_gb=2.0)]
+    return pl.Trainer(max_epochs=max_epochs, callbacks=callbacks, logger=False, accelerator="cpu",
+                      enable_progress_bar=False, enable_model_summary=False)
+
+
+def _fake_free_space(monkeypatch, values):
+    """free_space_gb returns the given values in turn (then the last one)."""
+    values = list(values)
+    monkeypatch.setattr(callbacks_module, "free_space_gb",
+                        lambda path: values.pop(0) if len(values) > 1 else values[0])
+
+
+def test_free_space_gb_accepts_a_folder_not_created_yet(tmp_path):
+    assert free_space_gb(tmp_path / "not" / "created" / "yet") > 0
+
+
+def test_disk_guard_refuses_to_start_on_a_full_disk(tmp_path, monkeypatch):
+    _fake_free_space(monkeypatch, [0.5])
+    loader = DataLoader(TensorDataset(torch.randn(4, 2)), batch_size=2)
+    with pytest.raises(LowDiskSpaceError):
+        fit_with_resume(_guarded_trainer(tmp_path), _DecliningDiceModule(), loader, loader, tmp_path)
+    assert not (tmp_path / "last.ckpt").exists()
+
+
+def test_disk_guard_stops_cleanly_with_an_error_and_a_valid_last_checkpoint(tmp_path, monkeypatch):
+    # Enough space at the start and after epoch 0, then the disk fills up during epoch 1
+    _fake_free_space(monkeypatch, [10.0, 10.0, 1.0])
+    loader = DataLoader(TensorDataset(torch.randn(4, 2)), batch_size=2)
+    with pytest.raises(LowDiskSpaceError, match="--resume"):
+        fit_with_resume(_guarded_trainer(tmp_path, max_epochs=5), _DecliningDiceModule(),
+                        loader, loader, tmp_path)
+    assert torch.load(tmp_path / "last.ckpt", weights_only=False)["epoch"] == 1  # resumable
+    assert not (tmp_path / "DONE").exists()  # the fold is not marked as finished
+
+
+def test_disk_guard_lets_a_normal_training_finish(tmp_path, monkeypatch):
+    _fake_free_space(monkeypatch, [10.0])
+    loader = DataLoader(TensorDataset(torch.randn(4, 2)), batch_size=2)
+    assert fit_with_resume(_guarded_trainer(tmp_path), _DecliningDiceModule(), loader, loader, tmp_path)
+    assert (tmp_path / "DONE").exists()
+
+
+def test_default_config_is_the_reference_configuration():
+    """The defaults reproduce the README reference command (run cv_classes_w5_aug)."""
+    reference = ("--max-epochs 250 --lr-scheduler cosine --warmup-epochs 5 --loss dicece "
+                 "--num-samples 4 --batch-size 2 --accumulate 1 --sampling classes "
+                 "--rare-weight 3 --rare-loss-weight 5 --augmentation strong").split()
+    parser = add_train_args(argparse.ArgumentParser())
+    assert TrainConfig.from_args(parser.parse_args([])) == TrainConfig.from_args(parser.parse_args(reference))
