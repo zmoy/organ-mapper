@@ -27,8 +27,13 @@ sys.path.append(str(PROJECT_ROOT))
 from src.data.dataset import get_data_dicts, get_kfold_splits, get_loaders
 from src.training.config import TrainConfig, add_train_args
 from src.training.factory import (
-    build_module, build_trainer, build_transforms, fit_with_resume, is_finished,
+    build_module,
+    build_trainer,
+    build_transforms,
+    fit_with_resume,
+    is_finished,
 )
+
 
 def main():
     parser = add_train_args(argparse.ArgumentParser(description=__doc__))

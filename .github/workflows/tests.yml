@@ -1,4 +1,4 @@
-# Runs the fast unit tests (no data, no GPU) on every push and pull request.
+# Lint, report freshness and fast unit tests (no data, no GPU) on every push and pull request.
 name: tests
 
 on:
@@ -21,6 +21,12 @@ jobs:
 
       - name: Install dependencies (CPU-only PyTorch)
         run: pip install -r requirements-ci.txt
+
+      - name: Lint (ruff, configured in pyproject.toml)
+        run: ruff check .
+
+      - name: Check that results/REPORT.md matches the evaluation files
+        run: python scripts/report.py --check
 
       - name: Run the fast tests
         run: pytest tests/test_core.py -q

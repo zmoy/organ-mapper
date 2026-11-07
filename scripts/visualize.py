@@ -30,13 +30,8 @@ from matplotlib.patches import Patch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
 
-from src.data.transforms import NUM_CLASSES
+from src.data.transforms import NUM_CLASSES, ORGAN_NAMES
 
-# BTCV label order (checked on img0007: position and volume of each label)
-ORGAN_NAMES = [
-    "spleen", "right kidney", "left kidney", "gallbladder", "esophagus", "liver", "stomach",
-    "aorta", "inferior vena cava", "portal/splenic vein", "pancreas", "right adrenal", "left adrenal",
-]
 # One clearly distinct colour per organ (none close to grey, so that each stays visible on the CT)
 COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2",
           "#ffd700", "#00e5ff", "#ff00ff", "#7cfc00", "#ff1493", "#00bfa0"]

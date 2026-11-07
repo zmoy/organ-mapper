@@ -175,7 +175,9 @@ Ajouter `--checkpoint-kind last` pour évaluer le dernier checkpoint de chaque f
 pytest tests/test_core.py
 ```
 
-Ils tournent aussi automatiquement sur GitHub Actions à chaque push sur `main` et à chaque pull request (`.github/workflows/tests.yml`, PyTorch en version CPU via `requirements-ci.txt`).
+Ils tournent aussi automatiquement sur GitHub Actions à chaque push sur `main` et à chaque pull request (`.github/workflows/tests.yml`, PyTorch en version CPU via `requirements-ci.txt`). La CI vérifie aussi le code avec le linter `ruff` (`ruff check .`, configuré dans `pyproject.toml`) et que le rapport des résultats est à jour.
+
+**Rapport des résultats :** `results/REPORT.md` rassemble toutes les évaluations (`results/evaluation_*.json`) dans des tableaux triés par Dice, avec le détail par organe du meilleur résultat. Il se régénère avec `python scripts/report.py` après chaque nouvelle évaluation.
 
 **4. Lancement de l'inférence :**
 Génère les volumes .nii.gz prédits (par défaut sur toutes les images de `imagesTs`) à partir du checkpoint de votre choix.

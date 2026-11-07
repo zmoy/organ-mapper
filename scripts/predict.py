@@ -24,10 +24,19 @@ from pathlib import Path
 import torch
 
 # Importations spécifiques MONAI
-from monai.data import Dataset, DataLoader, decollate_batch
+from monai.data import DataLoader, Dataset, decollate_batch
 from monai.transforms import (
-    Compose, LoadImaged, EnsureChannelFirstd, Orientationd, Spacingd,
-    ScaleIntensityRanged, EnsureTyped, AsDiscreted, Invertd, SaveImaged, MapTransform
+    AsDiscreted,
+    Compose,
+    EnsureChannelFirstd,
+    EnsureTyped,
+    Invertd,
+    LoadImaged,
+    MapTransform,
+    Orientationd,
+    SaveImaged,
+    ScaleIntensityRanged,
+    Spacingd,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]

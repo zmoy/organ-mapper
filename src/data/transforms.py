@@ -29,6 +29,11 @@ from monai.transforms import (
 )
 
 NUM_CLASSES = 14  # 13 organs + background; keep in sync with get_model / OrganMapperModule
+# Names of the labels 1..13, BTCV order (checked on img0007: position and volume of each label)
+ORGAN_NAMES = (
+    "spleen", "right kidney", "left kidney", "gallbladder", "esophagus", "liver", "stomach",
+    "aorta", "inferior vena cava", "portal/splenic vein", "pancreas", "right adrenal", "left adrenal",
+)
 # Label ids the baseline never segments (Dice 0 in results/evaluation.json and in the fold-1 trials).
 RARE_CLASSES = (4, 5, 10, 12, 13)
 # Side-specific labels (right, left): kidneys and adrenal glands. In the RAS orientation the

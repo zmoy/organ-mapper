@@ -27,19 +27,26 @@ from torch.utils.data import DataLoader, TensorDataset
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.data.dataset import get_kfold_splits
-from src.data.transforms import (
-    NUM_CLASSES, RARE_CLASSES, RandFlipLateralSwapd, get_augmentations, get_class_ratios, get_flips,
-    get_train_transforms, swap_lateral_labels,
-)
 from monai.inferers import sliding_window_inference
 
+import src.training.callbacks as callbacks_module
 from src.checkpoints import find_fold_checkpoints, load_model
+from src.data.dataset import get_kfold_splits
+from src.data.transforms import (
+    NUM_CLASSES,
+    RARE_CLASSES,
+    RandFlipLateralSwapd,
+    get_augmentations,
+    get_class_ratios,
+    get_flips,
+    get_train_transforms,
+    swap_lateral_labels,
+)
 from src.inference import MIRROR_AXES, predict_volume
 from src.models.builder import get_model
 from src.postprocess import VOXEL_SPACING as POSTPROCESS_SPACING
 from src.postprocess import keep_largest_components
-import src.training.callbacks as callbacks_module
+from src.reporting import load_results, parse_result, render_report
 from src.training.callbacks import DiskSpaceGuard, GracefulStop, LowDiskSpaceError, free_space_gb
 from src.training.config import TrainConfig, add_train_args
 from src.training.factory import build_checkpoint_callbacks, build_loss, fit_with_resume
@@ -476,6 +483,49 @@ def test_ensemble_averages_the_models_probabilities():
 def test_unknown_sliding_window_mode_raises():
     with pytest.raises(ValueError):
         predict_volume(torch.nn.Identity(), torch.zeros(1, 1, 8, 8, 8), (8, 8, 8), torch.device("cpu"), mode="x")
+
+
+# --- Report of the evaluation results ---
+
+def _cv_json(dice: float) -> dict:
+    fold = {"num_patients": 6, "missed_per_organ": [0] * 12 + [1]}
+    return {
+        "folds": [1, 2], "per_fold": [fold, fold], "checkpoint_kind": "best", "postprocess": True,
+        "inference": {"mode": "gaussian", "overlap": 0.75, "tta": False},
+        "mean_dice": {"mean": dice, "std": 0.02}, "mean_hd95": {"mean": 20.0, "std": 4.0},
+        "mean_nsd": {"mean": 0.6, "std": 0.01},
+        "dice_per_organ": {"mean": [0.9] * 13, "std": [0.0] * 13},
+        "hd95_per_organ": {"mean": [10.0] * 13, "std": [0.0] * 13},
+        "nsd_per_organ": {"mean": [0.7] * 13, "std": [0.0] * 13},
+    }
+
+
+def test_parse_result_reads_both_json_formats():
+    cv = parse_result("run", _cv_json(0.7))
+    assert (cv.folds, cv.patients, cv.missed) == (2, 12, 2)
+    assert cv.dice == (0.7, 0.02) and cv.inference == "gaussian 75 %"
+
+    holdout = parse_result("old", {"num_patients": 6, "mean_dice": 0.44, "mean_hd95": 61.0,
+                                   "dice_per_organ": [0.5] * 13, "missed_per_organ": [1] * 13})
+    assert (holdout.folds, holdout.dice, holdout.nsd, holdout.missed) == (1, (0.44, None), None, 13)
+    assert not holdout.postprocess and holdout.inference is None
+
+    one_fold = parse_result("f1", {**_cv_json(0.6), "folds": [1]})
+    assert one_fold.dice == (0.6, None)  # no meaningless "± 0.000"
+
+
+def test_render_report_sorts_by_dice_and_flags_old_hd95(tmp_path):
+    import json
+    (tmp_path / "evaluation_low.json").write_text(json.dumps(_cv_json(0.5)))
+    (tmp_path / "evaluation_high.json").write_text(json.dumps(_cv_json(0.7)))
+    old = {"folds": [1], "mean_dice": {"mean": 0.4, "std": 0.0}, "mean_hd95": {"mean": 90.0, "std": 0.0}}
+    (tmp_path / "evaluation_old.json").write_text(json.dumps(old))
+
+    report = render_report(load_results(tmp_path))
+    assert report.index("`high`") < report.index("`low`")
+    assert "0.700 ± 0.020" in report and "90.0 †" in report
+    assert "Par organe : `high`" in report and "| 13 left adrenal | 0.900 |" in report
+    assert report.endswith("\n")
 
 
 # --- Visualization ---

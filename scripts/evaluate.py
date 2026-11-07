@@ -261,7 +261,7 @@ def evaluate_checkpoint(
                     cache.save(names[idx], val_outputs[0].argmax(dim=0).numpy())
             if postprocess:
                 val_outputs = keep_largest_components(val_outputs, min_component_ratio, max_component_distance)
-            val_labels = torch.stack([post_label(l) for l in labels]).to(torch.uint8)
+            val_labels = torch.stack([post_label(lbl) for lbl in labels]).to(torch.uint8)
 
             label_present = val_labels[0, 1:].flatten(1).sum(dim=1).numpy() > 0
             pred_present = val_outputs[0, 1:].flatten(1).sum(dim=1).numpy() > 0

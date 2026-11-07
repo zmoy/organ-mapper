@@ -129,7 +129,9 @@ def build_trainer(
     else:
         save_dir = PROJECT_ROOT / "results" / "logs"
         version = _latest_csv_version(save_dir / run_name) if resume else None
-        history = _read_csv_history(save_dir / run_name / f"version_{version}" / "metrics.csv") if resume and version is not None else []
+        history = []
+        if resume and version is not None:
+            history = _read_csv_history(save_dir / run_name / f"version_{version}" / "metrics.csv")
         logger = CSVLogger(save_dir=str(save_dir), name=run_name, version=version)
         # CSVLogger deletes the old metrics.csv when it opens the folder: put the rows back
         # so that the epochs run before the stop stay in the log.
