@@ -3,7 +3,10 @@ Module handling data transformations for the Organ Mapper project.
 Uses MONAI transform chains for reproducible pre-processing.
 """
 
+import torch
 from monai.transforms import (
+    MapTransform,
+    RandomizableTransform,
     Compose,
     LoadImaged,
     EnsureChannelFirstd,
@@ -28,6 +31,93 @@ from monai.transforms import (
 NUM_CLASSES = 14  # 13 organs + background; keep in sync with get_model / OrganMapperModule
 # Label ids the baseline never segments (Dice 0 in results/evaluation.json and in the fold-1 trials).
 RARE_CLASSES = (4, 5, 10, 12, 13)
+# Side-specific labels (right, left): kidneys and adrenal glands. In the RAS orientation the
+# left-right direction is spatial axis 0 (checked on the predictions: right kidney and liver
+# at high x, left kidney and spleen at low x).
+LATERAL_PAIRS = ((2, 3), (12, 13))
+LATERAL_AXIS = 0
+
+
+def swap_lateral_labels(label: torch.Tensor, pairs: tuple[tuple[int, int], ...] = LATERAL_PAIRS) -> torch.Tensor:
+    """
+    Swaps the right / left label values (2 <-> 3, 12 <-> 13) of a label map.
+
+    Args:
+        label: Integer-valued label map (any shape, float or integer dtype).
+        pairs: (right, left) label pairs to swap.
+
+    Returns:
+        A new tensor of the same shape and type.
+    """
+    swapped = label.clone()
+    for right, left in pairs:
+        swapped[label == right] = left
+        swapped[label == left] = right
+    return swapped
+
+
+class RandFlipLateralSwapd(RandomizableTransform, MapTransform):
+    """
+    Random mirroring of the patches, independently along each spatial axis, that keeps
+    the side-specific labels right.
+
+    Flipping the left-right axis puts the right kidney on the left side of the image: its
+    label is then swapped with the left kidney's (same for the adrenal glands), so that a
+    label always means "the kidney on this side of the image". The other axes carry no
+    side-specific label and are flipped as is. Applied to the training patches only (the
+    affine of the flipped patch is not updated).
+
+    Args:
+        keys: Keys to flip (image and label).
+        label_key: Key whose values are swapped when LATERAL_AXIS is flipped.
+        spatial_axes: Spatial axes (0 = left-right in RAS) that may be flipped.
+        prob: Probability of flipping each axis.
+    """
+
+    def __init__(self, keys, label_key: str = "label", spatial_axes: tuple[int, ...] = (0, 1, 2),
+                 prob: float = 0.5):
+        MapTransform.__init__(self, keys)
+        RandomizableTransform.__init__(self, prob=1.0)
+        self.label_key = label_key
+        self.spatial_axes = tuple(spatial_axes)
+        self.flip_prob = prob
+        self._flipped: tuple[int, ...] = ()
+
+    def randomize(self, data=None) -> None:
+        self._flipped = tuple(a for a in self.spatial_axes if self.R.rand() < self.flip_prob)
+
+    def __call__(self, data):
+        self.randomize()
+        d = dict(data)
+        if not self._flipped:
+            return d
+        dims = [a + 1 for a in self._flipped]  # channel-first tensors
+        for key in self.key_iterator(d):
+            d[key] = torch.flip(d[key], dims)
+            if key == self.label_key and LATERAL_AXIS in self._flipped:
+                d[key] = swap_lateral_labels(d[key])
+        return d
+
+
+def get_flips(flip: str = "none") -> list:
+    """
+    Random mirroring of the training patches (see RandFlipLateralSwapd).
+
+    Args:
+        flip: "none" (no mirroring, the pipeline up to cv_classes_w5_aug), "lr" (left-right
+            axis only) or "all" (each of the 3 axes with probability 0.5, as in nnU-Net, which
+            matches the 8 mirrors of the test-time augmentation).
+
+    Returns:
+        A list of MONAI dictionary transforms (empty for "none").
+    """
+    if flip == "none":
+        return []
+    if flip == "lr":
+        return [RandFlipLateralSwapd(keys=["image", "label"], spatial_axes=(LATERAL_AXIS,))]
+    if flip == "all":
+        return [RandFlipLateralSwapd(keys=["image", "label"], spatial_axes=(0, 1, 2))]
+    raise ValueError(f"Unknown flip '{flip}'. Choose 'none', 'lr' or 'all'.")
 
 
 def get_class_ratios(rare_weight: float = 3.0, background_weight: float = 2.0) -> list[float]:
@@ -49,6 +139,7 @@ def get_train_transforms(
     sampling: str = "posneg",
     rare_weight: float = 3.0,
     augmentation: str = "light",
+    flip: str = "none",
 ) -> Compose:
     """
     Builds the MONAI transform pipeline for training.
@@ -67,12 +158,13 @@ def get_train_transforms(
             relative to the other organs (weight 1).
         augmentation: Random transforms applied to the patches (see get_augmentations):
             "light" (the original pipeline) or "strong" (nnU-Net-like ranges).
+        flip: Random mirroring of the patches (see get_flips): "none", "lr" or "all".
 
     Returns:
         Compose: The composed MONAI transforms pipeline.
     """
 
-    augmentations = get_augmentations(augmentation, spatial_size, intensity_shift)
+    augmentations = get_augmentations(augmentation, spatial_size, intensity_shift) + get_flips(flip)
 
     if sampling == "classes":
         # The class indices are deterministic, so they land in the on-disk cache
@@ -156,9 +248,9 @@ def get_augmentations(
     """
     Random transforms applied to the training patches.
 
-    No random flip: abdominal anatomy is not symmetric and some labels are
-    side-specific (kidneys 2/3, adrenal glands 12/13), so a left-right flip
-    would need to swap them. No elastic deformation either: it is slow on the CPU
+    No random flip here: abdominal anatomy is not symmetric and some labels are
+    side-specific (kidneys 2/3, adrenal glands 12/13), so mirroring is a separate
+    option that swaps them (get_flips). No elastic deformation either: it is slow on the CPU
     and the data loading runs in the main process (num_workers=0 on Windows).
 
     Args:

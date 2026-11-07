@@ -34,6 +34,7 @@ class TrainConfig:
     rare_weight: float = 3.0           # sampling weight of the rare organs when sampling="classes"
     rare_loss_weight: float = 5.0      # loss weight of the rare organs (dicece only); 1 = unweighted
     augmentation: str = "strong"       # light | strong (see src/data/transforms.get_augmentations)
+    flip: str = "none"                 # none | lr | all: random mirroring with left/right label swap
     min_free_gb: float = 2.0           # stop cleanly below this free disk space (see DiskSpaceGuard)
     logger: str = "wandb"              # wandb | csv
     run_name: str | None = None
@@ -63,6 +64,7 @@ class TrainConfig:
             rare_weight=args.rare_weight,
             rare_loss_weight=args.rare_loss_weight,
             augmentation=args.augmentation,
+            flip=args.flip,
             min_free_gb=args.min_free_gb,
             logger=args.logger,
             run_name=args.run_name,
@@ -93,6 +95,10 @@ def add_train_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
                         help="Weight of the rare organs in the DiceCE loss (others = 1; 1 = no weighting).")
     parser.add_argument("--augmentation", default=d.augmentation, choices=["light", "strong"],
                         help="Patch augmentations: light (original) or strong (nnU-Net-like ranges, no flip).")
+    parser.add_argument("--flip", default=d.flip, choices=["none", "lr", "all"],
+                        help="Random mirroring of the patches (p=0.5 per axis): left-right axis only (lr) or "
+                             "the 3 axes (all, as nnU-Net); the right/left labels (kidneys, adrenal glands) "
+                             "are swapped when the left-right axis is flipped.")
     parser.add_argument("--min-free-gb", type=float, default=d.min_free_gb,
                         help="Free disk space (GB) below which the training refuses to start, or stops "
                              "cleanly at the end of the epoch (resumable with --resume) and exits with an error.")

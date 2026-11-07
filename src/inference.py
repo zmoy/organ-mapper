@@ -10,10 +10,13 @@ command-line defaults of add_inference_args are the best measured settings):
     - overlap: fraction of overlap between neighbouring patches.
     - tta: test-time augmentation by mirroring; the softmax probabilities are averaged
       over the 8 combinations of flips of the 3 spatial axes (as in nnU-Net).
-      It only makes sense for a model trained with random flips: abdominal anatomy is
-      not symmetric (liver on the right, spleen on the left) and a model that never saw
-      a mirrored CT segments it very badly (Dice 0.01 to 0.19 on each mirrored input,
-      0.56 on the original, for one fold-5 volume).
+      It only makes sense for a model trained with random flips (train_cv.py --flip):
+      abdominal anatomy is not symmetric (liver on the right, spleen on the left) and a
+      model that never saw a mirrored CT segments it very badly (Dice 0.01 to 0.19 on
+      each mirrored input, 0.56 on the original, for one fold-5 volume).
+      Such a model learns that a label means "the kidney on this side of the image": on
+      an input mirrored along the left-right axis, its right / left channels are swapped
+      back (lateral_pairs, scripts pass src.data.transforms.LATERAL_PAIRS).
 """
 
 import argparse
@@ -56,6 +59,8 @@ def predict_volume(
     overlap: float = 0.5,
     mode: str = "constant",
     tta: bool = False,
+    lateral_pairs: tuple[tuple[int, int], ...] = (),
+    lateral_dim: int = 2,
 ) -> torch.Tensor:
     """
     Sliding-window prediction of a full volume. The patches run on `device`, the
@@ -69,6 +74,9 @@ def predict_volume(
         overlap: Overlap between neighbouring patches (0.5 = 50 %).
         mode: "constant" or "gaussian" weighting of the overlapping patches.
         tta: Average the probabilities over the 8 mirrored versions of the input.
+        lateral_pairs: With tta, (right, left) channel pairs swapped back on the inputs
+            mirrored along lateral_dim (the side-specific organs). () swaps nothing.
+        lateral_dim: Tensor dimension of the left-right axis (2 = spatial axis 0 in RAS).
 
     Returns:
         Softmax probabilities of shape (B, num_classes, X, Y, Z), float32, on the CPU.
@@ -90,6 +98,12 @@ def predict_volume(
             del logits
             if axes:
                 p = torch.flip(p, axes)  # back to the original orientation
+                if lateral_dim in axes and lateral_pairs:
+                    # The mirrored right kidney was predicted as the left one (and vice versa)
+                    order = list(range(p.shape[1]))
+                    for right, left in lateral_pairs:
+                        order[right], order[left] = left, right
+                    p = p[:, order]
             if probs is None:
                 probs = p
             else:

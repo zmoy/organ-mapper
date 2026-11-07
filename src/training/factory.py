@@ -41,7 +41,7 @@ def build_transforms(cfg: TrainConfig):
     train = get_train_transforms(spatial_size=cfg.spatial_size, num_samples=cfg.num_samples,
                                 intensity_shift=cfg.intensity_shift,
                                 sampling=cfg.sampling, rare_weight=cfg.rare_weight,
-                                augmentation=cfg.augmentation)
+                                augmentation=cfg.augmentation, flip=cfg.flip)
     val = get_val_transforms(spatial_size=cfg.spatial_size)
     return train, val
 
