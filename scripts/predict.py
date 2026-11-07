@@ -28,6 +28,7 @@ from monai.transforms import (
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
 
+from src.data.transforms import LATERAL_PAIRS
 from src.inference import add_inference_args, inference_settings, predict_volume
 from src.models.builder import get_model
 from src.postprocess import keep_largest_components
@@ -39,16 +40,18 @@ NUM_CLASSES = 14
 class KeepLargestComponentsd(MapTransform):
     """Dictionary transform applying src.postprocess.keep_largest_components to a label map (1, X, Y, Z)."""
 
-    def __init__(self, keys, num_classes: int = NUM_CLASSES, min_ratio: float = 1.0):
+    def __init__(self, keys, num_classes: int = NUM_CLASSES, min_ratio: float = 1.0,
+                 max_distance_mm: float = 0.0):
         super().__init__(keys)
         self.num_classes = num_classes
         self.min_ratio = min_ratio
+        self.max_distance_mm = max_distance_mm  # in the model space (src.postprocess.VOXEL_SPACING)
 
     def __call__(self, data):
         d = dict(data)
         for key in self.key_iterator(d):
             label_map = d[key][0].cpu().numpy().astype("uint8")
-            cleaned = keep_largest_components(label_map, self.num_classes, self.min_ratio)
+            cleaned = keep_largest_components(label_map, self.num_classes, self.min_ratio, self.max_distance_mm)
             d[key][0] = torch.from_numpy(cleaned).to(d[key].dtype)  # in place: keeps the MetaTensor metadata
         return d
 
@@ -70,6 +73,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-component-ratio", type=float, default=1.0,
                         help="With --postprocess: also keep the components at least this fraction of "
                              "the organ's largest one (1.0 = largest only).")
+    parser.add_argument("--max-component-distance", type=float, default=0.0,
+                        help="With --postprocess: also keep the components within this distance (mm) "
+                             "of the organ's largest one (0 = disabled).")
     parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "predictions")
     add_inference_args(parser)
     return parser.parse_args()
@@ -112,7 +118,8 @@ def main():
     ]
     if args.postprocess:
         # In the model space, before going back to the patient space (same rule as evaluate.py)
-        post_steps.append(KeepLargestComponentsd(keys="pred", min_ratio=args.min_component_ratio))
+        post_steps.append(KeepLargestComponentsd(keys="pred", min_ratio=args.min_component_ratio,
+                                                 max_distance_mm=args.max_component_distance))
     post_transforms = Compose(post_steps + [
         # L'inversion spatiale magique !
         Invertd(
@@ -161,7 +168,8 @@ def main():
 
                 print("Running sliding window inference...")
                 # Patches on GPU, stitched probabilities on CPU (4 GB of VRAM), see src/inference.py
-                batch_data["pred"] = predict_volume(model, inputs, SPATIAL_SIZE, device, **inference_settings(args))
+                batch_data["pred"] = predict_volume(model, inputs, SPATIAL_SIZE, device, **inference_settings(args),
+                                                    lateral_pairs=LATERAL_PAIRS)
 
                 # Decollate sépare le batch pour appliquer le post-traitement image par image
                 for i in decollate_batch(batch_data):

@@ -199,6 +199,13 @@ Conscient des limites matérielles de mon environnement local (4 Go de VRAM), j'
 
 * **Comparaison à nnU-Net** sur les mêmes folds, et **ensemble des 5 folds** pour l'inférence.
 * **Organes encore difficiles :** les organes 4, 11, 12 et 13 restent sous 0.5 de Dice en validation croisée.
-* **Augmentations :** les augmentations fortes (`--augmentation strong`) sont retenues (+1.9 point de Dice). Pistes suivantes : déformations élastiques (lentes sans workers parallèles), patchs plus grands ou spacing plus fin. Des retournements aléatoires à l'entraînement rendraient la TTA utilisable, à condition de traiter les organes pairs (reins, surrénales) dont l'étiquette droite/gauche s'inverse.
-* **Post-traitement plus fin :** garder aussi les morceaux d'au moins 10 % du plus gros (`--min-component-ratio 0.1`) n'a pas été retenu. La rate du fold 3 remonte (Dice 0.60 → 0.74), mais les fausses détections conservées dégradent le HD95 moyen (21.8 → 33.6 mm) pour un Dice inchangé (0.700 → 0.702). Une règle tenant compte de la distance au plus gros morceau, ou de la position anatomique, reste à essayer.
+* **Augmentations :** les augmentations fortes (`--augmentation strong`) sont retenues (+1.9 point de Dice). Pistes suivantes : déformations élastiques (lentes sans workers parallèles), patchs plus grands ou spacing plus fin. Les retournements aléatoires (`--flip all`, avec échange des étiquettes droite/gauche des reins et surrénales) rendent la TTA utilisable, mais ne sont pas retenus. Sur le fold 1, le Dice passe de 0.694 à 0.626 sans TTA et à 0.636 avec. Le modèle sous-apprend : avec 8 orientations, 250 epochs ne suffisent pas, le Dice de validation finit à 0.54 contre 0.62. À retenter avec `--flip lr` seul ou un entraînement plus long.
+* **Post-traitement plus fin :** garder aussi les morceaux d'au moins 10 % du plus gros (`--min-component-ratio 0.1`) n'a pas été retenu. La rate du fold 3 remonte (Dice 0.60 → 0.74), mais les fausses détections conservées dégradent le HD95 moyen (21.8 → 33.6 mm) pour un Dice inchangé (0.700 → 0.702). Garder les morceaux proches du plus gros (`--max-component-distance`, en mm) n'a pas été retenu non plus. Testé sur le fold 1 (modèle avec augmentations fortes), aucune distance n'améliore à la fois le Dice et le HD95 :
+
+  | Distance | 0 (plus gros morceau seul) | 5 mm | 10 mm | 20 mm | 40 mm |
+  | :--- | :--- | :--- | :--- | :--- | :--- |
+  | Dice | 0.694 | 0.693 | 0.695 | 0.691 | 0.689 |
+  | HD95 (mm) | **27.3** | 27.9 | 27.9 | 29.5 | 31.7 |
+
+  À 10 mm, la vésicule gagne 4 points de Dice, mais le rein gauche perd (HD95 +13.5 mm), et au-delà de 20 mm le foie aussi. Depuis les augmentations fortes, la rate ne se fragmente plus, et les morceaux secondaires sont surtout de fausses détections. Une règle par organe serait réglée sur 6 volumes seulement, donc elle n'a pas été tentée. Pour comparer des post-traitements, `evaluate.py --predictions-cache <dossier>` enregistre les prédictions brutes et les réutilise : environ 2.5 min par réglage au lieu de 14 min par fold.
 * **Ré-entraînement cloud** (ex : AWS EC2 avec GPU A10G) pour des modèles plus gros, et pré-entraînement du Swin UNETR.

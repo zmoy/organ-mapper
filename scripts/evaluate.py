@@ -19,6 +19,12 @@ Two modes:
 
 Inference options (shared with predict.py, see src/inference.py): --sw-overlap,
 --sw-mode {constant,gaussian} and --tta (mirroring test-time augmentation).
+
+--predictions-cache DIR saves the raw predictions (before post-processing) of each volume,
+and reuses them on the next run with the same checkpoint and inference settings: comparing
+post-processing settings then takes minutes instead of an hour of sliding window.
+    python scripts/evaluate.py --cv --checkpoints-dir checkpoints/<run> --postprocess \
+        --predictions-cache predictions/cache/<run>_best --max-component-distance 10
 """
 
 import argparse
@@ -38,7 +44,7 @@ sys.path.append(str(PROJECT_ROOT))
 
 from src.models.builder import get_model
 from src.data.dataset import get_data_dicts, get_dataset, get_kfold_splits, split_train_val
-from src.data.transforms import get_val_transforms
+from src.data.transforms import LATERAL_PAIRS, get_val_transforms
 from src.inference import add_inference_args, inference_settings, predict_volume
 from src.postprocess import keep_largest_components as keep_largest_components_np
 
@@ -86,6 +92,16 @@ def parse_args() -> argparse.Namespace:
         help="With --postprocess: also keep the components at least this fraction of the organ's "
              "largest one (1.0 = largest only).",
     )
+    parser.add_argument(
+        "--max-component-distance", type=float, default=0.0,
+        help="With --postprocess: also keep the components within this distance (mm) of the "
+             "organ's largest one (0 = disabled).",
+    )
+    parser.add_argument(
+        "--predictions-cache", type=Path, default=None,
+        help="Folder where the raw predictions are saved, and reused by a later run with the same "
+             "checkpoint and inference settings (fold_k/ subfolders in --cv mode).",
+    )
     add_inference_args(parser)
     return parser.parse_args()
 
@@ -122,32 +138,82 @@ def find_fold_checkpoint(checkpoints_dir: Path, fold: int, kind: str = "best") -
     return candidates[-1]
 
 
-def keep_largest_components(onehot: torch.Tensor, min_ratio: float = 1.0) -> torch.Tensor:
+def keep_largest_components(
+    onehot: torch.Tensor, min_ratio: float = 1.0, max_distance_mm: float = 0.0
+) -> torch.Tensor:
     """
-    Post-processing: for each organ keep its largest connected component (and the
-    components at least min_ratio times as large) and relabel the other islands as
-    background (removes far-away false detections).
+    Post-processing: for each organ keep its largest connected component (plus the
+    components at least min_ratio times as large, or within max_distance_mm of it) and
+    relabel the other islands as background (removes far-away false detections).
 
     Args:
         onehot: uint8 one-hot prediction of shape (1, NUM_CLASSES, X, Y, Z).
-        min_ratio: See src.postprocess.keep_largest_components.
+        min_ratio, max_distance_mm: See src.postprocess.keep_largest_components.
 
     Returns:
         A one-hot uint8 tensor of the same shape.
     """
     label_map = keep_largest_components_np(
-        onehot[0].argmax(dim=0).numpy().astype(np.uint8), NUM_CLASSES, min_ratio
+        onehot[0].argmax(dim=0).numpy().astype(np.uint8), NUM_CLASSES, min_ratio,
+        max_distance_mm, VOXEL_SPACING,
     )
-    cleaned = torch.zeros_like(onehot)
+    return to_onehot(label_map)
+
+
+def to_onehot(label_map: np.ndarray) -> torch.Tensor:
+    """(X, Y, Z) label map -> uint8 one-hot tensor of shape (1, NUM_CLASSES, X, Y, Z)."""
+    onehot = torch.zeros((1, NUM_CLASSES, *label_map.shape), dtype=torch.uint8)
     for c in range(NUM_CLASSES):
-        cleaned[0, c] = torch.from_numpy(label_map == c)
-    return cleaned
+        onehot[0, c] = torch.from_numpy(label_map == c)
+    return onehot
+
+
+class PredictionCache:
+    """
+    Raw predictions (argmax label maps, before post-processing) saved to disk, one
+    compressed .npz per volume, so that post-processing settings can be compared without
+    running the sliding window again.
+
+    A meta.json file records the checkpoint and the inference settings: reusing the folder
+    with other settings raises an error instead of silently mixing predictions.
+    """
+
+    def __init__(self, folder: Path, checkpoint: Path, inference: dict | None):
+        self.folder = Path(folder)
+        self.meta = {"checkpoint": str(Path(checkpoint).resolve()), "inference": inference or {}}
+        meta_file = self.folder / "meta.json"
+        if meta_file.exists():
+            saved = json.loads(meta_file.read_text())
+            if saved != self.meta:
+                raise ValueError(
+                    f"{self.folder} holds predictions of another checkpoint or other inference "
+                    f"settings ({saved}); use another --predictions-cache folder."
+                )
+        else:
+            self.folder.mkdir(parents=True, exist_ok=True)
+            meta_file.write_text(json.dumps(self.meta, indent=2))
+
+    def _path(self, name: str) -> Path:
+        return self.folder / f"{name}.npz"
+
+    def load(self, name: str) -> np.ndarray | None:
+        path = self._path(name)
+        return np.load(path)["label_map"] if path.exists() else None
+
+    def save(self, name: str, label_map: np.ndarray) -> None:
+        np.savez_compressed(self._path(name), label_map=label_map.astype(np.uint8))
+
+
+def volume_name(file_dict: dict) -> str:
+    """'img0007' for an image file data/raw/imagesTr/img0007.nii.gz."""
+    return Path(file_dict["image"]).name.split(".")[0]
 
 
 def evaluate_checkpoint(
     checkpoint: Path, model_name: str, val_files: list[dict], device: torch.device,
     postprocess: bool = False, nsd_tolerance: float = 2.0,
     inference: dict | None = None, min_component_ratio: float = 1.0,
+    max_component_distance: float = 0.0, predictions_cache: Path | None = None,
 ) -> dict:
     """
     Evaluates one checkpoint on full volumes.
@@ -157,6 +223,10 @@ def evaluate_checkpoint(
             keep_largest_components) before computing the metrics.
         min_component_ratio: With postprocess, also keep the components at least this
             fraction of the organ's largest one.
+        max_component_distance: With postprocess, also keep the components within this
+            distance (mm) of the organ's largest one (0 = disabled).
+        predictions_cache: Folder of a PredictionCache (raw predictions reused when present,
+            saved otherwise); None runs the inference on every volume.
         nsd_tolerance: Tolerance (mm) of the Normalized Surface Distance.
         inference: Keyword arguments of src.inference.predict_volume (overlap, mode, tta);
             None keeps its defaults.
@@ -166,13 +236,19 @@ def evaluate_checkpoint(
         organ is absent from the label), and "missed" (organs present in the label but never
         predicted, per organ).
     """
-    print(f"Loading checkpoint: {checkpoint}")
-    model = get_model(model_name=model_name, spatial_size=SPATIAL_SIZE)
-    # Only the network weights: the checkpoint may also hold loss buffers (class weights)
-    state = torch.load(checkpoint, map_location="cpu", weights_only=False)["state_dict"]
-    model.load_state_dict({k[len("model."):]: v for k, v in state.items() if k.startswith("model.")})
-    model = model.to(device)
-    model.eval()
+    cache = PredictionCache(predictions_cache, checkpoint, inference) if predictions_cache else None
+    names = [volume_name(f) for f in val_files]
+    model = None
+    if cache is None or any(cache.load(n) is None for n in names):
+        print(f"Loading checkpoint: {checkpoint}")
+        model = get_model(model_name=model_name, spatial_size=SPATIAL_SIZE)
+        # Only the network weights: the checkpoint may also hold loss buffers (class weights)
+        state = torch.load(checkpoint, map_location="cpu", weights_only=False)["state_dict"]
+        model.load_state_dict({k[len("model."):]: v for k, v in state.items() if k.startswith("model.")})
+        model = model.to(device)
+        model.eval()
+    else:
+        print(f"All {len(names)} predictions found in {predictions_cache}: no inference needed.")
 
     val_ds = get_dataset(
         val_files, get_val_transforms(spatial_size=SPATIAL_SIZE, full_volume=True), cache_name="val_full"
@@ -193,18 +269,24 @@ def evaluate_checkpoint(
     print(f"Evaluating on {len(val_loader)} full patient volumes...")
     with torch.no_grad():
         for idx, batch_data in enumerate(val_loader):
-            print(f"  Patient {idx + 1}/{len(val_loader)} - Sliding Window Inference...")
-            images = batch_data["image"].to(device)
             labels = batch_data["label"]
-
-            # Probabilities stitched on the CPU (see src/inference.py)
-            outputs = predict_volume(model, images, SPATIAL_SIZE, device, **(inference or {}))
-
-            # One-hot masks as uint8 (4x smaller than float32)
-            val_outputs = torch.stack([post_pred(o) for o in outputs]).to(torch.uint8)
-            del outputs
+            cached = cache.load(names[idx]) if cache else None
+            if cached is not None:
+                print(f"  Patient {idx + 1}/{len(val_loader)} - cached prediction")
+                val_outputs = to_onehot(cached)
+            else:
+                print(f"  Patient {idx + 1}/{len(val_loader)} - Sliding Window Inference...")
+                images = batch_data["image"].to(device)
+                # Probabilities stitched on the CPU (see src/inference.py)
+                outputs = predict_volume(model, images, SPATIAL_SIZE, device, **(inference or {}),
+                                         lateral_pairs=LATERAL_PAIRS)
+                # One-hot masks as uint8 (4x smaller than float32)
+                val_outputs = torch.stack([post_pred(o) for o in outputs]).to(torch.uint8)
+                del outputs, images
+                if cache:
+                    cache.save(names[idx], val_outputs[0].argmax(dim=0).numpy())
             if postprocess:
-                val_outputs = keep_largest_components(val_outputs, min_component_ratio)
+                val_outputs = keep_largest_components(val_outputs, min_component_ratio, max_component_distance)
             val_labels = torch.stack([post_label(l) for l in labels]).to(torch.uint8)
 
             label_present = val_labels[0, 1:].flatten(1).sum(dim=1).numpy() > 0
@@ -234,7 +316,7 @@ def evaluate_checkpoint(
             hd95_rows.append(hd95)
             nsd_rows.append(nsd)
 
-            del images, labels, val_outputs, val_labels
+            del labels, val_outputs, val_labels
             if device.type == "cuda":
                 torch.cuda.empty_cache()
 
@@ -316,7 +398,8 @@ def main():
         _, val_files = split_train_val(data_dicts)
         result = evaluate_checkpoint(
             args.checkpoint, args.model, val_files, device, args.postprocess, args.nsd_tolerance,
-            inference_settings(args), args.min_component_ratio,
+            inference_settings(args), args.min_component_ratio, args.max_component_distance,
+            args.predictions_cache,
         )
         summary = summarize_run(result)
         print_holdout(summary)
@@ -327,6 +410,7 @@ def main():
             "model": args.model,
             "postprocess": args.postprocess,
             "min_component_ratio": args.min_component_ratio,
+            "max_component_distance_mm": args.max_component_distance,
             "nsd_tolerance_mm": args.nsd_tolerance,
             "inference": inference_settings(args),
             "num_patients": summary["num_patients"],
@@ -348,9 +432,11 @@ def main():
             ckpt = find_fold_checkpoint(args.checkpoints_dir, fold, args.checkpoint_kind)
             checkpoints.append(str(ckpt))
             _, val_files = splits[fold - 1]
+            fold_cache = args.predictions_cache / f"fold_{fold}" if args.predictions_cache else None
             summaries.append(summarize_run(
                 evaluate_checkpoint(ckpt, args.model, val_files, device, args.postprocess, args.nsd_tolerance,
-                                    inference_settings(args), args.min_component_ratio)
+                                    inference_settings(args), args.min_component_ratio,
+                                    args.max_component_distance, fold_cache)
             ))
 
         stack = lambda key: np.stack([s[key] for s in summaries])  # noqa: E731
@@ -378,6 +464,7 @@ def main():
             "model": args.model,
             "postprocess": args.postprocess,
             "min_component_ratio": args.min_component_ratio,
+            "max_component_distance_mm": args.max_component_distance,
             "checkpoint_kind": args.checkpoint_kind,
             "nsd_tolerance_mm": args.nsd_tolerance,
             "inference": inference_settings(args),

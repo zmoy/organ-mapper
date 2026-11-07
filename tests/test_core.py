@@ -29,11 +29,13 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data.dataset import get_kfold_splits
 from src.data.transforms import (
-    NUM_CLASSES, RARE_CLASSES, get_augmentations, get_class_ratios, get_train_transforms,
+    NUM_CLASSES, RARE_CLASSES, RandFlipLateralSwapd, get_augmentations, get_class_ratios, get_flips,
+    get_train_transforms, swap_lateral_labels,
 )
 from monai.inferers import sliding_window_inference
 
 from src.inference import MIRROR_AXES, predict_volume
+from src.postprocess import VOXEL_SPACING as POSTPROCESS_SPACING
 from src.postprocess import keep_largest_components
 import src.training.callbacks as callbacks_module
 from src.training.callbacks import DiskSpaceGuard, GracefulStop, LowDiskSpaceError, free_space_gb
@@ -83,6 +85,67 @@ def test_min_ratio_keeps_large_pieces_and_drops_small_islands():
     assert (only_largest == 1).sum() == 1000
     assert (relaxed == 1).sum() == 1000 + 216
     assert (relaxed[25:27, 25:27, 25:27] == 0).all()
+
+
+def _organ_in_three_pieces() -> np.ndarray:
+    """Organ 1: largest piece x 1..10, a close piece 3 voxels away along x, a far island."""
+    label_map = np.zeros((40, 20, 20), dtype=np.uint8)
+    label_map[1:11, 1:11, 1:11] = 1      # largest piece (1000 voxels), last x index 10
+    label_map[13:15, 4:6, 4:6] = 1       # 8 voxels, x 13: 3 voxels x 1.5 mm = 4.5 mm away
+    label_map[30:32, 4:6, 4:6] = 1       # 8 voxels, x 30: 20 voxels x 1.5 mm = 30 mm away
+    return label_map
+
+
+def test_max_distance_keeps_close_pieces_and_drops_far_islands():
+    cleaned = keep_largest_components(_organ_in_three_pieces(), NUM_CLASSES, max_distance_mm=5.0,
+                                      spacing=(1.5, 1.5, 2.0))
+    assert (cleaned == 1).sum() == 1000 + 8
+    assert (cleaned[13:15, 4:6, 4:6] == 1).all()
+    assert (cleaned[30:32] == 0).all()
+
+
+def test_max_distance_below_the_gap_keeps_only_the_largest():
+    cleaned = keep_largest_components(_organ_in_three_pieces(), NUM_CLASSES, max_distance_mm=4.0,
+                                      spacing=(1.5, 1.5, 2.0))
+    assert (cleaned == 1).sum() == 1000
+
+
+def test_max_distance_uses_the_voxel_spacing():
+    # Same gap of 3 voxels, but along z (2 mm per voxel): 6 mm
+    label_map = np.zeros((20, 20, 40), dtype=np.uint8)
+    label_map[1:11, 1:11, 1:11] = 1
+    label_map[4:6, 4:6, 13:15] = 1
+    kept = lambda d: (keep_largest_components(label_map.copy(), NUM_CLASSES, max_distance_mm=d,  # noqa: E731
+                                              spacing=(1.5, 1.5, 2.0)) == 1).sum()
+    assert kept(5.0) == 1000
+    assert kept(7.0) == 1008
+
+
+def test_postprocess_and_evaluation_share_the_voxel_spacing():
+    assert POSTPROCESS_SPACING == _load_script("evaluate").VOXEL_SPACING
+
+
+def test_prediction_cache_round_trip_and_refuses_other_settings(tmp_path):
+    evaluate = _load_script("evaluate")
+    label_map = np.random.default_rng(0).integers(0, NUM_CLASSES, (8, 8, 8)).astype(np.uint8)
+    cache = evaluate.PredictionCache(tmp_path, Path("fold_1/best.ckpt"), {"mode": "gaussian", "overlap": 0.75})
+    assert cache.load("img0001") is None
+    cache.save("img0001", label_map)
+
+    reopened = evaluate.PredictionCache(tmp_path, Path("fold_1/best.ckpt"), {"mode": "gaussian", "overlap": 0.75})
+    assert np.array_equal(reopened.load("img0001"), label_map)
+    with pytest.raises(ValueError):
+        evaluate.PredictionCache(tmp_path, Path("fold_1/best.ckpt"), {"mode": "gaussian", "overlap": 0.5})
+    with pytest.raises(ValueError):
+        evaluate.PredictionCache(tmp_path, Path("fold_1/last.ckpt"), {"mode": "gaussian", "overlap": 0.75})
+
+
+def test_to_onehot_inverts_argmax():
+    evaluate = _load_script("evaluate")
+    label_map = np.random.default_rng(0).integers(0, NUM_CLASSES, (6, 6, 6)).astype(np.uint8)
+    onehot = evaluate.to_onehot(label_map)
+    assert onehot.shape == (1, NUM_CLASSES, 6, 6, 6) and onehot.dtype == torch.uint8
+    assert np.array_equal(onehot[0].argmax(dim=0).numpy(), label_map)
 
 
 # --- K-fold split ---
@@ -183,9 +246,64 @@ def test_light_augmentation_is_the_original_pipeline():
 
 
 def test_no_augmentation_flips_the_patches():
-    # Left-right flips would swap the side-specific labels (kidneys, adrenal glands)
+    # Mirroring is a separate option (get_flips), which swaps the side-specific labels
     for level in ("light", "strong"):
         assert not any("Flip" in type(t).__name__ for t in get_augmentations(level))
+    assert get_flips("none") == []
+
+
+def test_swap_lateral_labels():
+    label = torch.tensor([0, 1, 2, 3, 6, 12, 13])
+    assert swap_lateral_labels(label).tolist() == [0, 1, 3, 2, 6, 13, 12]
+
+
+def _lateral_patch() -> dict:
+    """A 1x8x6x4 patch: right kidney (2) at high x, left kidney (3) at low x, liver (6) at high y."""
+    label = torch.zeros(1, 8, 6, 4)
+    label[0, 6:, :, :] = 2
+    label[0, :2, :, :] = 3
+    label[0, 3:5, 5, :] = 6
+    image = torch.arange(8 * 6 * 4, dtype=torch.float32).view(1, 8, 6, 4)
+    return {"image": image, "label": label}
+
+
+def test_left_right_flip_swaps_the_side_specific_labels():
+    patch = _lateral_patch()
+    flip = RandFlipLateralSwapd(keys=["image", "label"], spatial_axes=(0,), prob=1.0)
+    out = flip(patch)
+    assert torch.equal(out["image"], torch.flip(patch["image"], [1]))
+    # The kidney now at high x is the original left one, relabelled as the right kidney
+    assert (out["label"][0, 6:] == 2).all() and (out["label"][0, :2] == 3).all()
+    assert torch.equal(out["label"] == 6, torch.flip(patch["label"] == 6, [1]))
+
+
+def test_other_axis_flips_keep_the_labels():
+    patch = _lateral_patch()
+    out = RandFlipLateralSwapd(keys=["image", "label"], spatial_axes=(1, 2), prob=1.0)(patch)
+    assert torch.equal(out["label"], torch.flip(patch["label"], [2, 3]))
+    assert torch.equal(out["image"], torch.flip(patch["image"], [2, 3]))
+
+
+def test_flips_are_random_and_reproducible():
+    flip = RandFlipLateralSwapd(keys=["image", "label"], prob=0.5)
+    flip.set_random_state(seed=0)
+    first = [flip(_lateral_patch())["image"] for _ in range(8)]
+    flip.set_random_state(seed=0)
+    again = [flip(_lateral_patch())["image"] for _ in range(8)]
+    assert all(torch.equal(a, b) for a, b in zip(first, again))
+    assert len({tuple(x.flatten()[:3].tolist()) for x in first}) > 1  # not always the same flips
+
+
+def test_flip_option_in_the_training_pipeline(synthetic_volume):
+    transforms = get_train_transforms(spatial_size=(16, 16, 16), num_samples=4, sampling="classes",
+                                      augmentation="strong", flip="all")
+    assert "RandFlipLateralSwapd" in [type(t).__name__ for t in transforms.transforms]
+    transforms.set_random_state(seed=0)
+    for patch in transforms(synthetic_volume):
+        assert tuple(patch["label"].shape) == (1, 16, 16, 16)
+        assert set(patch["label"].unique().tolist()) <= {0.0, 6.0, 12.0, 13.0}  # 12 may become 13
+    with pytest.raises(ValueError):
+        get_flips("unknown")
 
 
 def test_unknown_augmentation_raises():
@@ -277,6 +395,34 @@ def test_tta_flips_back_the_predictions():
     # Half of the mirrors flip X: the average is symmetric, i.e. 0.5 everywhere
     assert torch.allclose(tta, torch.full_like(tta, 0.5), atol=1e-5)
     assert not torch.allclose(plain, tta)
+
+
+class _SideAwareModel(torch.nn.Module):
+    """
+    Ideal model trained with left-right flips and label swap: channel 1 ("right kidney")
+    wherever the input is positive on the high-x half of the image, channel 2 ("left kidney")
+    on the low-x half, channel 0 (background) elsewhere.
+    """
+
+    def forward(self, x):
+        high_x = (torch.arange(x.shape[2]) >= x.shape[2] // 2).view(1, 1, -1, 1, 1).float()
+        organ = (x > 0).float()
+        logits = torch.stack([1 - organ, organ * high_x, organ * (1 - high_x)], dim=1)[:, :, 0]
+        return 10 * logits
+
+
+def test_tta_swaps_back_the_side_specific_channels():
+    image = torch.zeros(1, 1, 16, 8, 8)
+    image[0, 0, 12:15, 2:6, 2:6] = 1  # an organ on the high-x (right) side
+    plain = predict_volume(_SideAwareModel(), image, (16, 8, 8), torch.device("cpu"))
+    swapped = predict_volume(_SideAwareModel(), image, (16, 8, 8), torch.device("cpu"), tta=True,
+                             lateral_pairs=((1, 2),))
+    no_swap = predict_volume(_SideAwareModel(), image, (16, 8, 8), torch.device("cpu"), tta=True)
+    # With the swap the mirrored inputs agree with the plain prediction; without it, half of
+    # them call the organ "left": the average is split between the two channels.
+    assert torch.equal(swapped.argmax(dim=1), plain.argmax(dim=1))
+    assert torch.allclose(swapped, plain, atol=1e-4)
+    assert torch.allclose(no_swap[0, 1, 13, 3, 3], no_swap[0, 2, 13, 3, 3], atol=1e-4)
 
 
 def test_unknown_sliding_window_mode_raises():
