@@ -23,6 +23,8 @@ Moyenne sur les volumes de validation (± écart-type entre folds en validation 
 
 | Résultat | Volumes | Checkpoint | Post-traitement | Inférence | Dice | HD95 (mm) | NSD | Organes manqués |
 | :--- | ---: | :--- | :--- | :--- | :--- | :--- | :--- | ---: |
+| `cv_classes_w5_aug_panc_fold1_last` | 6 | last | oui | gaussian 75 % | 0.687 | 29.1 | 0.595 | 0 |
+| `cv_classes_w5_aug_panc_fold1_best` | 6 | best | oui | gaussian 75 % | 0.686 | 29.2 | 0.593 | 0 |
 | `trialJ_lossw5_pp` | 6 | — | oui | — | 0.654 | 23.1 † | — | 0 |
 | `trialJ_lossw5` | 6 | — | non | — | 0.641 | 122.2 † | — | 0 |
 | `cv_classes_w5_aug_flip_fold1_best_tta` | 6 | best | oui | gaussian 75 % + TTA | 0.636 | 29.1 | 0.538 | 0 |

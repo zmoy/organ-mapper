@@ -23,16 +23,18 @@ from src.training.lightning_module import OrganMapperModule
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
-def build_loss(name: str, rare_loss_weight: float = 1.0) -> torch.nn.Module:
+def build_loss(
+    name: str, rare_loss_weight: float = 1.0, rare_classes: tuple[int, ...] = RARE_CLASSES
+) -> torch.nn.Module:
     if name == "gdl":
         return GeneralizedDiceLoss(to_onehot_y=True, softmax=True, include_background=False)
     if name == "dicece":
         # Dice on the organs + cross-entropy on all classes (CE keeps gradients stable early on)
         weight = None
         if rare_loss_weight != 1.0:
-            # Per-class weight (used by both the Dice and the CE terms): RARE_CLASSES count more
+            # Per-class weight (used by both the Dice and the CE terms): rare_classes count more
             weight = torch.ones(NUM_CLASSES)
-            weight[list(RARE_CLASSES)] = rare_loss_weight
+            weight[list(rare_classes)] = rare_loss_weight
         return DiceCELoss(to_onehot_y=True, softmax=True, include_background=False, weight=weight)
     raise ValueError(f"Unknown loss '{name}'. Choose 'gdl' or 'dicece'.")
 
@@ -40,7 +42,7 @@ def build_loss(name: str, rare_loss_weight: float = 1.0) -> torch.nn.Module:
 def build_transforms(cfg: TrainConfig):
     train = get_train_transforms(spatial_size=cfg.spatial_size, num_samples=cfg.num_samples,
                                 intensity_shift=cfg.intensity_shift,
-                                sampling=cfg.sampling, rare_weight=cfg.rare_weight,
+                                sampling=cfg.sampling, rare_weight=cfg.rare_weight, rare_classes=cfg.rare_classes,
                                 augmentation=cfg.augmentation, flip=cfg.flip)
     val = get_val_transforms(spatial_size=cfg.spatial_size)
     return train, val
@@ -49,7 +51,7 @@ def build_transforms(cfg: TrainConfig):
 def build_module(cfg: TrainConfig) -> OrganMapperModule:
     return OrganMapperModule(
         model=get_model(model_name=cfg.model_name, spatial_size=cfg.spatial_size),
-        loss_function=build_loss(cfg.loss, cfg.rare_loss_weight),
+        loss_function=build_loss(cfg.loss, cfg.rare_loss_weight, cfg.rare_classes),
         optimizer_class=AdamW,
         optimizer_kwargs={"lr": cfg.lr, "weight_decay": cfg.weight_decay},
         val_roi_size=cfg.spatial_size,

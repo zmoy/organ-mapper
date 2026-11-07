@@ -49,7 +49,13 @@ from src.postprocess import keep_largest_components
 from src.reporting import load_results, parse_result, render_report
 from src.training.callbacks import DiskSpaceGuard, GracefulStop, LowDiskSpaceError, free_space_gb
 from src.training.config import TrainConfig, add_train_args
-from src.training.factory import build_checkpoint_callbacks, build_loss, fit_with_resume
+from src.training.factory import (
+    build_checkpoint_callbacks,
+    build_loss,
+    build_module,
+    build_transforms,
+    fit_with_resume,
+)
 
 
 def _load_script(name: str):
@@ -640,3 +646,21 @@ def test_default_config_is_the_reference_configuration():
                  "--rare-weight 3 --rare-loss-weight 5 --augmentation strong").split()
     parser = add_train_args(argparse.ArgumentParser())
     assert TrainConfig.from_args(parser.parse_args([])) == TrainConfig.from_args(parser.parse_args(reference))
+
+
+def test_rare_classes_option_reaches_the_sampling_and_the_loss():
+    assert TrainConfig().rare_classes == RARE_CLASSES  # default = the reference rare organs
+    parser = add_train_args(argparse.ArgumentParser())
+    cfg = TrainConfig.from_args(parser.parse_args("--rare-classes 4 5 10 11 12 13".split()))
+    assert cfg.rare_classes == (4, 5, 10, 11, 12, 13)
+
+    expected = [2.0] + [3.0 if c in cfg.rare_classes else 1.0 for c in range(1, NUM_CLASSES)]
+    assert get_class_ratios(3.0, rare_classes=cfg.rare_classes) == expected
+    crop = next(t for t in build_transforms(cfg)[0].transforms if type(t).__name__ == "RandCropByLabelClassesd")
+    assert list(crop.cropper.ratios) == expected
+
+    weight = build_module(cfg).loss_function.dice.class_weight
+    # MONAI drops the background weight in the Dice term: index 0 = organ 1
+    assert weight[10].item() == 5.0 and weight[6].item() == 1.0
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--rare-classes", "0"])  # the background is not an organ

@@ -33,6 +33,7 @@ class TrainConfig:
     sampling: str = "classes"          # posneg | classes (class-balanced patch centers)
     rare_weight: float = 3.0           # sampling weight of the rare organs when sampling="classes"
     rare_loss_weight: float = 5.0      # loss weight of the rare organs (dicece only); 1 = unweighted
+    rare_classes: tuple[int, ...] = (4, 5, 10, 12, 13)  # the rare organs (= transforms.RARE_CLASSES)
     augmentation: str = "strong"       # light | strong (see src/data/transforms.get_augmentations)
     flip: str = "none"                 # none | lr | all: random mirroring with left/right label swap
     min_free_gb: float = 2.0           # stop cleanly below this free disk space (see DiskSpaceGuard)
@@ -63,6 +64,7 @@ class TrainConfig:
             sampling=args.sampling,
             rare_weight=args.rare_weight,
             rare_loss_weight=args.rare_loss_weight,
+            rare_classes=tuple(args.rare_classes),
             augmentation=args.augmentation,
             flip=args.flip,
             min_free_gb=args.min_free_gb,
@@ -71,6 +73,14 @@ class TrainConfig:
             fast_dev_run=args.fast_dev_run,
             resume=args.resume,
         )
+
+
+def _organ_label(value: str) -> int:
+    """argparse type of --rare-classes: an organ label, 1 to 13 (0 is the background)."""
+    label = int(value)
+    if not 1 <= label <= 13:
+        raise argparse.ArgumentTypeError(f"{label} is not an organ label (1 to 13).")
+    return label
 
 
 def add_train_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -93,6 +103,9 @@ def add_train_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
                         help="With --sampling classes: weight of the rare organs (others = 1, background = 2).")
     parser.add_argument("--rare-loss-weight", type=float, default=d.rare_loss_weight,
                         help="Weight of the rare organs in the DiceCE loss (others = 1; 1 = no weighting).")
+    parser.add_argument("--rare-classes", type=_organ_label, nargs="+", default=list(d.rare_classes),
+                        help="Organ labels (1-13) favoured by --rare-weight and --rare-loss-weight "
+                             "(default: 4 5 10 12 13).")
     parser.add_argument("--augmentation", default=d.augmentation, choices=["light", "strong"],
                         help="Patch augmentations: light (original) or strong (nnU-Net-like ranges, no flip).")
     parser.add_argument("--flip", default=d.flip, choices=["none", "lr", "all"],

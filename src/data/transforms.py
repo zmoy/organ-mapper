@@ -125,13 +125,17 @@ def get_flips(flip: str = "none") -> list:
     raise ValueError(f"Unknown flip '{flip}'. Choose 'none', 'lr' or 'all'.")
 
 
-def get_class_ratios(rare_weight: float = 3.0, background_weight: float = 2.0) -> list[float]:
+def get_class_ratios(
+    rare_weight: float = 3.0,
+    background_weight: float = 2.0,
+    rare_classes: tuple[int, ...] = RARE_CLASSES,
+) -> list[float]:
     """
     Sampling weight of each class for the patch centers: background_weight for
-    the background (class 0), rare_weight for RARE_CLASSES, 1 for the other organs.
+    the background (class 0), rare_weight for rare_classes, 1 for the other organs.
     """
     return [
-        background_weight if c == 0 else rare_weight if c in RARE_CLASSES else 1.0
+        background_weight if c == 0 else rare_weight if c in rare_classes else 1.0
         for c in range(NUM_CLASSES)
     ]
 
@@ -143,6 +147,7 @@ def get_train_transforms(
     intensity_shift: bool = True,
     sampling: str = "posneg",
     rare_weight: float = 3.0,
+    rare_classes: tuple[int, ...] = RARE_CLASSES,
     augmentation: str = "light",
     flip: str = "none",
 ) -> Compose:
@@ -159,8 +164,9 @@ def get_train_transforms(
         sampling: How patch centers are drawn. "posneg": any organ voxel vs
             background, 1:1 (favours big organs). "classes": pick a class first
             (see get_class_ratios), then a voxel of that class.
-        rare_weight: With sampling="classes", sampling weight of the RARE_CLASSES
+        rare_weight: With sampling="classes", sampling weight of the rare_classes
             relative to the other organs (weight 1).
+        rare_classes: Organ labels favoured by rare_weight (default RARE_CLASSES).
         augmentation: Random transforms applied to the patches (see get_augmentations):
             "light" (the original pipeline) or "strong" (nnU-Net-like ranges).
         flip: Random mirroring of the patches (see get_flips): "none", "lr" or "all".
@@ -187,7 +193,7 @@ def get_train_transforms(
                 keys=["image", "label"],
                 label_key="label",
                 spatial_size=spatial_size,
-                ratios=get_class_ratios(rare_weight),
+                ratios=get_class_ratios(rare_weight, rare_classes=rare_classes),
                 num_classes=NUM_CLASSES,
                 num_samples=num_samples,
                 indices_key="label_cls_indices",
