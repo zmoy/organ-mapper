@@ -42,7 +42,7 @@ from monai.transforms import AsDiscrete
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
 
-from src.models.builder import get_model
+from src.checkpoints import find_fold_checkpoint, load_model
 from src.data.dataset import get_data_dicts, get_dataset, get_kfold_splits, split_train_val
 from src.data.transforms import LATERAL_PAIRS, get_val_transforms
 from src.inference import add_inference_args, inference_settings, predict_volume
@@ -115,27 +115,6 @@ def nan_stat(values: np.ndarray, func, axis: int = 0) -> np.ndarray:
 
 def to_list(values: np.ndarray) -> list[float | None]:
     return [None if np.isnan(v) else float(v) for v in values]
-
-
-def find_fold_checkpoint(checkpoints_dir: Path, fold: int, kind: str = "best") -> Path:
-    """
-    Args:
-        kind: "best" (best-Dice checkpoint) or "last" (last.ckpt, end of the training).
-    """
-    if kind == "last":
-        last = checkpoints_dir / f"fold_{fold}" / "last.ckpt"
-        if not last.exists():
-            raise FileNotFoundError(f"No last.ckpt in {last.parent}")
-        return last
-    # rglob: older runs wrote "name-val/dice=x.ckpt", i.e. inside a subfolder
-    found = list((checkpoints_dir / f"fold_{fold}").rglob("*.ckpt"))
-    # last.ckpt (resume state) is only a fallback: the best-Dice checkpoint is the reference
-    candidates = sorted((p for p in found if p.name != "last.ckpt"), key=lambda p: p.stat().st_mtime)
-    if not candidates:
-        candidates = found
-    if not candidates:
-        raise FileNotFoundError(f"No .ckpt found in {checkpoints_dir / f'fold_{fold}'}")
-    return candidates[-1]
 
 
 def keep_largest_components(
@@ -241,12 +220,7 @@ def evaluate_checkpoint(
     model = None
     if cache is None or any(cache.load(n) is None for n in names):
         print(f"Loading checkpoint: {checkpoint}")
-        model = get_model(model_name=model_name, spatial_size=SPATIAL_SIZE)
-        # Only the network weights: the checkpoint may also hold loss buffers (class weights)
-        state = torch.load(checkpoint, map_location="cpu", weights_only=False)["state_dict"]
-        model.load_state_dict({k[len("model."):]: v for k, v in state.items() if k.startswith("model.")})
-        model = model.to(device)
-        model.eval()
+        model = load_model(checkpoint, model_name, device, SPATIAL_SIZE)
     else:
         print(f"All {len(names)} predictions found in {predictions_cache}: no inference needed.")
 

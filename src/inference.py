@@ -17,9 +17,13 @@ command-line defaults of add_inference_args are the best measured settings):
       Such a model learns that a label means "the kidney on this side of the image": on
       an input mirrored along the left-right axis, its right / left channels are swapped
       back (lateral_pairs, scripts pass src.data.transforms.LATERAL_PAIRS).
+
+predict_volume also takes several models (e.g. the 5 cross-validation folds, see
+src.checkpoints.find_fold_checkpoints): their softmax probabilities are averaged.
 """
 
 import argparse
+from collections.abc import Iterable
 from itertools import combinations
 
 import torch
@@ -52,7 +56,7 @@ def inference_settings(args: argparse.Namespace) -> dict:
 
 
 def predict_volume(
-    model: torch.nn.Module,
+    model: torch.nn.Module | Iterable[torch.nn.Module],
     image: torch.Tensor,
     roi_size: tuple[int, int, int],
     device: torch.device,
@@ -67,7 +71,8 @@ def predict_volume(
     stitched output is kept on the CPU (4 GB of VRAM).
 
     Args:
-        model: Network in eval mode, already on `device`.
+        model: Network in eval mode, already on `device`, or several networks (ensemble):
+            the probabilities are averaged over the networks (and over the mirrors with tta).
         image: Input of shape (B, C, X, Y, Z).
         roi_size: Patch size of the sliding window.
         device: Device running the patches.
@@ -83,15 +88,18 @@ def predict_volume(
     """
     if mode not in ("constant", "gaussian"):
         raise ValueError(f"Unknown sliding window mode '{mode}'. Choose 'constant' or 'gaussian'.")
+    models = [model] if isinstance(model, torch.nn.Module) else list(model)
+    if not models:
+        raise ValueError("predict_volume needs at least one model.")
     image = image.to(device)
     mirrors = MIRROR_AXES if tta else [()]
     probs = None
     with torch.no_grad():
-        for axes in mirrors:
+        for net, axes in ((net, axes) for net in models for axes in mirrors):
             flipped = torch.flip(image, axes) if axes else image
             with torch.autocast(device_type=device.type, enabled=device.type == "cuda"):
                 logits = sliding_window_inference(
-                    flipped, roi_size, 1, model, overlap=overlap, mode=mode,
+                    flipped, roi_size, 1, net, overlap=overlap, mode=mode,
                     sw_device=device, device=torch.device("cpu"),
                 )
             p = torch.softmax(logits.float(), dim=1)
@@ -109,4 +117,4 @@ def predict_volume(
             else:
                 probs += p
                 del p
-    return probs / len(mirrors)
+    return probs / (len(models) * len(mirrors))

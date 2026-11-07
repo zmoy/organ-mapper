@@ -34,7 +34,9 @@ from src.data.transforms import (
 )
 from monai.inferers import sliding_window_inference
 
+from src.checkpoints import find_fold_checkpoints, load_model
 from src.inference import MIRROR_AXES, predict_volume
+from src.models.builder import get_model
 from src.postprocess import VOXEL_SPACING as POSTPROCESS_SPACING
 from src.postprocess import keep_largest_components
 import src.training.callbacks as callbacks_module
@@ -351,6 +353,34 @@ def test_find_fold_checkpoint_best_and_last(tmp_path):
         evaluate.find_fold_checkpoint(tmp_path, 2)
 
 
+def test_find_fold_checkpoints_one_per_fold_in_order(tmp_path):
+    for fold in (2, 10, 1):  # numeric order, not alphabetical (fold_10 after fold_2)
+        (tmp_path / f"fold_{fold}").mkdir()
+        (tmp_path / f"fold_{fold}" / f"run_fold_{fold}-epoch5-dice0.60.ckpt").write_bytes(b"")
+        (tmp_path / f"fold_{fold}" / "last.ckpt").write_bytes(b"")
+    (tmp_path / "fold_notes").mkdir()  # ignored
+
+    best = find_fold_checkpoints(tmp_path)
+    assert [p.parent.name for p in best] == ["fold_1", "fold_2", "fold_10"]
+    assert all(p.name != "last.ckpt" for p in best)
+    assert all(p.name == "last.ckpt" for p in find_fold_checkpoints(tmp_path, kind="last"))
+    with pytest.raises(FileNotFoundError):
+        find_fold_checkpoints(tmp_path / "fold_1")
+
+
+def test_load_model_keeps_only_the_network_weights(tmp_path):
+    torch.manual_seed(0)
+    net = get_model("unet")
+    state = {f"model.{k}": v for k, v in net.state_dict().items()}
+    state["loss_function.class_weight"] = torch.ones(14)  # loss buffer, must be skipped
+    torch.save({"state_dict": state}, tmp_path / "x.ckpt")
+
+    loaded = load_model(tmp_path / "x.ckpt", "unet", torch.device("cpu"))
+    assert not loaded.training
+    for key, value in net.state_dict().items():
+        assert torch.equal(loaded.state_dict()[key], value)
+
+
 # --- Inference: sliding window and test-time augmentation ---
 
 def test_mirror_axes_cover_the_8_flip_combinations():
@@ -423,6 +453,24 @@ def test_tta_swaps_back_the_side_specific_channels():
     assert torch.equal(swapped.argmax(dim=1), plain.argmax(dim=1))
     assert torch.allclose(swapped, plain, atol=1e-4)
     assert torch.allclose(no_swap[0, 1, 13, 3, 3], no_swap[0, 2, 13, 3, 3], atol=1e-4)
+
+
+def test_ensemble_averages_the_models_probabilities():
+    torch.manual_seed(0)
+    models = [torch.nn.Conv3d(1, 3, kernel_size=3, padding=1).eval() for _ in range(3)]
+    image = torch.randn(1, 1, 20, 18, 16)
+    device = torch.device("cpu")
+    singles = [predict_volume(m, image, (8, 8, 8), device, mode="gaussian") for m in models]
+    ensemble = predict_volume(models, image, (8, 8, 8), device, mode="gaussian")
+    assert torch.allclose(ensemble, torch.stack(singles).mean(dim=0), atol=1e-5)
+    assert torch.allclose(predict_volume(models[:1], image, (8, 8, 8), device),
+                          predict_volume(models[0], image, (8, 8, 8), device))
+    # With tta: average over models x mirrors, the lateral swap still applies to each model
+    side = predict_volume([_SideAwareModel(), _SideAwareModel()], torch.zeros(1, 1, 16, 8, 8),
+                          (16, 8, 8), device, tta=True, lateral_pairs=((1, 2),))
+    assert torch.allclose(side.sum(dim=1), torch.ones(1, 16, 8, 8), atol=1e-5)
+    with pytest.raises(ValueError):
+        predict_volume([], image, (8, 8, 8), device)
 
 
 def test_unknown_sliding_window_mode_raises():

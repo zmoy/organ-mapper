@@ -10,6 +10,11 @@ Usage:
     python scripts/predict.py --checkpoint checkpoints/cv_classes/fold_1/<name>.ckpt --postprocess
     python scripts/predict.py --model swin_unetr --checkpoint checkpoints/swin_trained_best/swin_trained.ckpt
     python scripts/predict.py --image <file or name in imagesTs>
+    python scripts/predict.py --ensemble-dir checkpoints/cv_classes_w5_aug --postprocess
+
+Ensemble (--ensemble-dir, or several --checkpoint): the softmax probabilities of the models
+(e.g. one per cross-validation fold) are averaged before the argmax. It cannot be scored by
+cross-validation: each validation volume was in the training set of the other folds.
 """
 
 import argparse
@@ -28,9 +33,9 @@ from monai.transforms import (
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
 
+from src.checkpoints import find_fold_checkpoints, load_model
 from src.data.transforms import LATERAL_PAIRS
 from src.inference import add_inference_args, inference_settings, predict_volume
-from src.models.builder import get_model
 from src.postprocess import keep_largest_components
 
 SPATIAL_SIZE = (96, 96, 96)
@@ -59,9 +64,18 @@ class KeepLargestComponentsd(MapTransform):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Segment the test CT volumes and save .nii.gz masks.")
     parser.add_argument(
-        "--checkpoint", type=Path,
-        default=PROJECT_ROOT / "checkpoints" / "unet_baseline_best" / "unet_baseline.ckpt",
-        help="Model checkpoint (default: the versioned U-Net baseline).",
+        "--checkpoint", type=Path, nargs="+",
+        default=[PROJECT_ROOT / "checkpoints" / "unet_baseline_best" / "unet_baseline.ckpt"],
+        help="Model checkpoint(s) (default: the versioned U-Net baseline). Several = ensemble.",
+    )
+    parser.add_argument(
+        "--ensemble-dir", type=Path, default=None,
+        help="Cross-validation run directory (fold_1/, fold_2/, ...): ensemble of one checkpoint "
+             "per fold, replaces --checkpoint.",
+    )
+    parser.add_argument(
+        "--checkpoint-kind", default="best", choices=["best", "last"],
+        help="With --ensemble-dir: best-Dice checkpoint of each fold or last.ckpt.",
     )
     parser.add_argument("--model", default="unet", choices=["unet", "swin_unetr"],
                         help="Architecture of the checkpoint.")
@@ -91,14 +105,16 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Running inference on device: {device}")
 
-    # --- 2. Chargement du Modèle ---
-    print(f"Loading {args.model} checkpoint from: {args.checkpoint}")
-    model = get_model(model_name=args.model, spatial_size=SPATIAL_SIZE)
-    # Only the network weights: the checkpoint may also hold loss buffers (class weights)
-    state = torch.load(args.checkpoint, map_location="cpu", weights_only=False)["state_dict"]
-    model.load_state_dict({k[len("model."):]: v for k, v in state.items() if k.startswith("model.")})
-    model = model.to(device)
-    model.eval()
+    # --- 2. Chargement du ou des modèles ---
+    checkpoints = (find_fold_checkpoints(args.ensemble_dir, args.checkpoint_kind)
+                   if args.ensemble_dir is not None else args.checkpoint)
+    models = []
+    for ckpt in checkpoints:
+        print(f"Loading {args.model} checkpoint from: {ckpt}")
+        # Only the network weights: the checkpoint may also hold loss buffers (class weights)
+        models.append(load_model(ckpt, args.model, device, SPATIAL_SIZE))
+    if len(models) > 1:
+        print(f"Ensemble of {len(models)} models: probabilities averaged.")
 
     # --- 3. Pipelines MONAI (Le secret est ici) ---
 
@@ -168,7 +184,7 @@ def main():
 
                 print("Running sliding window inference...")
                 # Patches on GPU, stitched probabilities on CPU (4 GB of VRAM), see src/inference.py
-                batch_data["pred"] = predict_volume(model, inputs, SPATIAL_SIZE, device, **inference_settings(args),
+                batch_data["pred"] = predict_volume(models, inputs, SPATIAL_SIZE, device, **inference_settings(args),
                                                     lateral_pairs=LATERAL_PAIRS)
 
                 # Decollate sépare le batch pour appliquer le post-traitement image par image

@@ -184,6 +184,14 @@ Génère les volumes .nii.gz prédits (par défaut sur toutes les images de `ima
 python scripts/predict.py --checkpoint checkpoints/cv_classes_w5/fold_1/<checkpoint>.ckpt --postprocess
 ```
 
+Ensemble des 5 modèles de la validation croisée : leurs probabilités sont moyennées avant l'argmax. L'option `--checkpoint-kind last` fonctionne comme pour `evaluate.py`. Le calcul est environ 5 fois plus lent (~5 min par image sur 4 Go de VRAM).
+
+```bash
+python scripts/predict.py --ensemble-dir checkpoints/cv_classes_w5_aug --postprocess --output-dir predictions/ensemble_cv_classes_w5_aug
+```
+
+L'ensemble ne peut pas être évalué en validation croisée : chaque volume de validation a servi à entraîner les 4 autres modèles. C'est la pratique standard (nnU-Net), avec un gain habituel de l'ordre d'un point de Dice, mais ce gain n'est pas mesuré ici.
+
 **5. Visualisation d'une prédiction :**
 Figure scanner / annotation / prédiction sur deux coupes axiales et une coupe coronale, en convention radiologique, avec le Dice de chaque organe. L'annotation est facultative (images de `imagesTs`).
 
@@ -197,8 +205,8 @@ Pour une exploration en 3D, ouvrir le scanner dans ITK-SNAP (File > Open Main Im
 
 Conscient des limites matérielles de mon environnement local (4 Go de VRAM), j'ai implémenté l'architecture et les pipelines MLOps sur ma machine. Les pistes restantes :
 
-* **Comparaison à nnU-Net** sur les mêmes folds, et **ensemble des 5 folds** pour l'inférence.
-* **Organes encore difficiles :** les organes 4, 11, 12 et 13 restent sous 0.5 de Dice en validation croisée.
+* **Comparaison à nnU-Net** sur les mêmes folds. L'ensemble des 5 folds est disponible pour l'inférence (`predict.py --ensemble-dir`), mais son gain n'est pas mesurable sans données annotées supplémentaires.
+* **Organes encore difficiles :** la vésicule (4), le pancréas (11) et les surrénales (12, 13) restent entre 0.53 et 0.61 de Dice en validation croisée.
 * **Augmentations :** les augmentations fortes (`--augmentation strong`) sont retenues (+1.9 point de Dice). Pistes suivantes : déformations élastiques (lentes sans workers parallèles), patchs plus grands ou spacing plus fin. Les retournements aléatoires (`--flip all`, avec échange des étiquettes droite/gauche des reins et surrénales) rendent la TTA utilisable, mais ne sont pas retenus. Sur le fold 1, le Dice passe de 0.694 à 0.626 sans TTA et à 0.636 avec. Le modèle sous-apprend : avec 8 orientations, 250 epochs ne suffisent pas, le Dice de validation finit à 0.54 contre 0.62. À retenter avec `--flip lr` seul ou un entraînement plus long.
 * **Post-traitement plus fin :** garder aussi les morceaux d'au moins 10 % du plus gros (`--min-component-ratio 0.1`) n'a pas été retenu. La rate du fold 3 remonte (Dice 0.60 → 0.74), mais les fausses détections conservées dégradent le HD95 moyen (21.8 → 33.6 mm) pour un Dice inchangé (0.700 → 0.702). Garder les morceaux proches du plus gros (`--max-component-distance`, en mm) n'a pas été retenu non plus. Testé sur le fold 1 (modèle avec augmentations fortes), aucune distance n'améliore à la fois le Dice et le HD95 :
 
