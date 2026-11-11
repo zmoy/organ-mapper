@@ -1,7 +1,8 @@
 """
 Where does the HD95 come from? Reads the "per_volume" diagnostics of an evaluation JSON
 (scripts/evaluate.py, see src/error_analysis.py) and prints, per organ:
-    - mean HD95 and its two directions: prediction -> label (predicted voxels far from the
+    - mean and median HD95 (a mean far above the median: a few volumes carry the error),
+      and the two directions of the HD95: prediction -> label (predicted voxels far from the
       annotation) and label -> prediction (parts of the organ left out);
     - mean craniocaudal over-extent above / below the annotated slices;
 then the worst (volume, organ) cases, with the commands that draw them
@@ -48,21 +49,23 @@ def main() -> int:
         return 1
 
     print(f"{args.evaluation.name}: {len(volumes)} volumes\n")
-    print(f"{'Organ':<24}{'HD95':>7}{'pred->lab':>11}{'lab->pred':>11}{'pred->lab':>11}"
+    print(f"{'Organ':<24}{'HD95':>7}{'median':>8}{'pred->lab':>11}{'lab->pred':>11}{'pred->lab':>11}"
           f"{'above':>8}{'below':>8}{'missed':>8}")
-    print(f"{'':<24}{'(mm)':>7}{'(mm)':>11}{'(mm)':>11}{'dominates':>11}{'(mm)':>8}{'(mm)':>8}")
+    print(f"{'':<24}{'(mm)':>7}{'(mm)':>8}{'(mm)':>11}{'(mm)':>11}{'dominates':>11}{'(mm)':>8}{'(mm)':>8}")
     for organ in args.organs:
         hd95 = values(volumes, "hd95", organ)
+        median = float(np.nanmedian(hd95)) if np.isfinite(hd95).any() else float("nan")
         to_label = values(volumes, "hd95_pred_to_label", organ)
         to_pred = values(volumes, "hd95_label_to_pred", organ)
         both = np.isfinite(to_label) & np.isfinite(to_pred)
         dominates = f"{int((to_label[both] > to_pred[both]).sum())}/{int(both.sum())}"
         missed = sum(v["missed"][organ - 1] for v in volumes)
-        print(f"{f'{organ} {ORGAN_NAMES[organ - 1]}':<24}{nanmean(hd95):>7.1f}{nanmean(to_label):>11.1f}"
+        print(f"{f'{organ} {ORGAN_NAMES[organ - 1]}':<24}{nanmean(hd95):>7.1f}{median:>8.1f}{nanmean(to_label):>11.1f}"
               f"{nanmean(to_pred):>11.1f}{dominates:>11}"
               f"{nanmean(values(volumes, 'overextent_superior_mm', organ)):>+8.1f}"
               f"{nanmean(values(volumes, 'overextent_inferior_mm', organ)):>+8.1f}{missed:>8}")
-    print("\npred->lab: predicted voxels far from the annotation (false positive region, organ segmented"
+    print("\nmedian: median HD95 over the volumes; far below the mean when a few volumes carry the error."
+          "\npred->lab: predicted voxels far from the annotation (false positive region, organ segmented"
           "\ntoo far); lab->pred: parts of the organ not predicted. above / below: how far the prediction"
           "\ngoes beyond the highest / lowest annotated slice (negative: stops before). Missed organs have"
           "\nHD95 = volume diagonal and no direction.")
