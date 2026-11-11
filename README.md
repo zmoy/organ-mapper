@@ -67,16 +67,24 @@ Contrairement aux images 2D classiques (RGB), l'imagerie médicale 3D nécessite
 ---
 
 ## 🛠️ Défis d'Ingénierie & MLOps (Contrainte : 4 Go VRAM)
-L'entraînement de modèles 3D massifs est notoirement coûteux en mémoire. Pour faire tourner un Transformer State-of-the-Art de 62 millions de paramètres sur une configuration locale limitée à 4 Go de VRAM et une RAM système restreinte, plusieurs stratégies ont été implémentées :
+Tout le projet tourne sur une machine locale : GPU de **4 Go de VRAM**, environ 7 Go de RAM, Windows. La segmentation 3D est gourmande en mémoire, d'où les choix suivants.
 
-1. **CPU Offloading & Métriques ciblées :** Déplacement des tenseurs de validation sur la RAM hôte et suppression du calcul de la *Validation Loss* géante au profit du *Dice Score* calculé via des tenseurs `one_hot` optimisés.
-2. **Gradient Accumulation :** Réduction du `batch_size` effectif à 1 avec accumulation des gradients sur 8 itérations pour simuler un grand batch size sans exploser la VRAM.
-3. **Patch-based Validation :** Abandon du *Sliding Window Inference* global en phase de validation au profit d'une évaluation par patchs pour prévenir les erreurs d'allocation système (`alloc_cpu.cpp OOM`).
+**Tenir dans 4 Go de VRAM**
+1. **Entraînement par patchs et précision mixte :** chaque étape traite 8 patchs de 96³ voxels (2 volumes × 4 patchs) en précision mixte (`16-mixed`). C'est la configuration mesurée qui tient en mémoire, sans accumulation de gradients. L'option `--accumulate` existe toujours : le premier `train.py` l'utilisait (batch de 1, accumulation sur 8 itérations).
+2. **Validation par patchs pendant l'entraînement :** le *sliding window* sur volume entier saturait la RAM (`alloc_cpu.cpp OOM`). La validation se fait donc sur des patchs, sans calcul de loss de validation. Le Dice est calculé sur des tenseurs `one_hot` déplacés sur le CPU.
+3. **Volumes entiers seulement pour l'évaluation et l'inférence :** `evaluate.py` et `predict.py` utilisent le *sliding window*. Le réseau tourne sur le GPU, la sortie est recousue sur le CPU, puis Dice, HD95 et NSD sont calculés organe par organe sur des masques `uint8` pour ménager la RAM.
+4. **Cache disque du prétraitement :** chargement, orientation, spacing et fenêtrage sont calculés une seule fois (`PersistentDataset`), environ 60 fois plus rapide ensuite.
 
-4. **Entraînement reprenable :** Ctrl+C arrête proprement à la fin de l'epoch (`last.ckpt`), et `--resume` reprend là où l'entraînement s'est arrêté (les folds terminés sont sautés).
-5. **Évaluation économe en RAM :** Dice, HD95 et NSD calculés organe par organe sur des masques `uint8`.
+**Des entraînements fiables**
+* **Entraînement reprenable :** Ctrl+C, ou un fichier `STOP` dans le dossier du run, arrête proprement à la fin de l'epoch. `--resume` repart de `last.ckpt`, et les folds terminés sont sautés.
+* **Garde d'espace disque :** sous 2 Go libres (`--min-free-gb`), l'entraînement refuse de démarrer ou s'arrête proprement en fin d'epoch, avec un code d'erreur.
+* **Configuration centralisée :** tous les réglages passent par `TrainConfig` et la ligne de commande. Les valeurs par défaut sont la configuration de référence, et un test vérifie qu'elles le restent.
+* **Suivi des expériences :** sur **Weights & Biases**, ou en CSV avec `--logger csv`.
 
-Les expériences peuvent être trackées sur **Weights & Biases** (ou en CSV avec `--logger csv`).
+**Qualité du code et de l'évaluation**
+* **CI GitHub Actions :** linter `ruff`, tests rapides sans données ni GPU, et vérification que le rapport des résultats (`results/REPORT.md`, généré depuis les JSON d'évaluation) est à jour.
+* **Comparaisons appariées :** un réglage n'est retenu qu'après un test apparié sur les mêmes volumes (`compare.py` : intervalle de confiance bootstrap et test de Wilcoxon). 6 volumes par fold ne suffisent pas à départager deux réglages à quelques points d'écart.
+* **Analyse d'erreurs :** `analyze_errors.py` indique d'où vient le HD95 de chaque organe (voir « Utilisation »).
 
 ---
 
