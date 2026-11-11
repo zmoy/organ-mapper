@@ -45,10 +45,10 @@ Moyenne sur les volumes de validation (± écart-type entre folds en validation 
 | 4 gallbladder | 0.562 | 17.2 | 0.452 |
 | 5 esophagus | 0.670 | 12.1 | 0.634 |
 | 6 liver | 0.942 | 9.1 | 0.732 |
-| 7 stomach | 0.730 | 23.2 | 0.443 |
+| 7 stomach | 0.730 | 23.1 | 0.443 |
 | 8 aorta | 0.836 | 30.6 | 0.783 |
 | 9 inferior vena cava | 0.756 | 13.4 | 0.607 |
-| 10 portal/splenic vein | 0.628 | 40.8 | 0.631 |
+| 10 portal/splenic vein | 0.628 | 40.8 | 0.630 |
 | 11 pancreas | 0.610 | 23.8 | 0.455 |
 | 12 right adrenal | 0.530 | 8.1 | 0.644 |
 | 13 left adrenal | 0.527 | 35.7 | 0.609 |

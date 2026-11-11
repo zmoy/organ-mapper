@@ -20,6 +20,10 @@ Two modes:
 Inference options (shared with predict.py, see src/inference.py): --sw-overlap,
 --sw-mode {constant,gaussian} and --tta (mirroring test-time augmentation).
 
+The JSON also holds per-volume results ("per_volume": Dice, HD95, NSD and the HD95
+diagnostics of src/error_analysis.py for each volume and organ), used by
+scripts/compare.py (paired tests) and scripts/analyze_errors.py.
+
 --predictions-cache DIR saves the raw predictions (before post-processing) of each volume,
 and reuses them on the next run with the same checkpoint and inference settings: comparing
 post-processing settings then takes minutes instead of an hour of sliding window.
@@ -45,6 +49,7 @@ sys.path.append(str(PROJECT_ROOT))
 from src.checkpoints import find_fold_checkpoint, load_model
 from src.data.dataset import get_data_dicts, get_dataset, get_kfold_splits, split_train_val
 from src.data.transforms import LATERAL_PAIRS, get_val_transforms
+from src.error_analysis import craniocaudal_overextent, directed_hd95
 from src.inference import add_inference_args, inference_settings, predict_volume
 from src.postprocess import keep_largest_components as keep_largest_components_np
 
@@ -183,6 +188,27 @@ class PredictionCache:
         np.savez_compressed(self._path(name), label_map=label_map.astype(np.uint8))
 
 
+DIAGNOSTICS = ("hd95_pred_to_label", "hd95_label_to_pred", "overextent_superior_mm", "overextent_inferior_mm")
+
+
+def per_volume_record(
+    name: str, dice: np.ndarray, hd95: np.ndarray, nsd: np.ndarray, diagnostics: dict, missed: np.ndarray
+) -> dict:
+    """
+    JSON-ready results of one volume: per-organ lists (13 values, None where undefined).
+
+    Args:
+        name: Volume name (see volume_name).
+        dice, hd95, nsd: Per-organ metrics.
+        diagnostics: Per-organ arrays keyed by DIAGNOSTICS.
+        missed: Boolean per organ, present in the label but never predicted.
+    """
+    record = {"name": name, "dice": to_list(dice), "hd95": to_list(hd95), "nsd": to_list(nsd)}
+    record.update({key: to_list(diagnostics[key]) for key in DIAGNOSTICS})
+    record["missed"] = [int(m) for m in missed]
+    return record
+
+
 def volume_name(file_dict: dict) -> str:
     """'img0007' for an image file data/raw/imagesTr/img0007.nii.gz."""
     return Path(file_dict["image"]).name.split(".")[0]
@@ -212,8 +238,8 @@ def evaluate_checkpoint(
 
     Returns:
         dict with per-patient arrays (patients x organs): "dice", "hd95", "nsd" (NaN where the
-        organ is absent from the label), and "missed" (organs present in the label but never
-        predicted, per organ).
+        organ is absent from the label), "missed" (organs present in the label but never
+        predicted, per organ), and "volumes" (one per_volume_record per patient).
     """
     cache = PredictionCache(predictions_cache, checkpoint, inference) if predictions_cache else None
     names = [volume_name(f) for f in val_files]
@@ -237,7 +263,7 @@ def evaluate_checkpoint(
     post_pred = AsDiscrete(argmax=True, to_onehot=NUM_CLASSES)
     post_label = AsDiscrete(to_onehot=NUM_CLASSES)
 
-    dice_rows, hd95_rows, nsd_rows = [], [], []
+    dice_rows, hd95_rows, nsd_rows, volumes = [], [], [], []
     missed = np.zeros(NUM_CLASSES - 1, dtype=int)
 
     print(f"Evaluating on {len(val_loader)} full patient volumes...")
@@ -272,6 +298,8 @@ def evaluate_checkpoint(
             dice = np.full(NUM_CLASSES - 1, np.nan)
             hd95 = np.full(NUM_CLASSES - 1, np.nan)
             nsd = np.full(NUM_CLASSES - 1, np.nan)
+            # HD95 diagnostics (src/error_analysis.py), defined when the organ is predicted
+            diag = {key: np.full(NUM_CLASSES - 1, np.nan) for key in DIAGNOSTICS}
             for organ in np.flatnonzero(label_present):  # organ absent from the ground truth: undefined
                 pred = val_outputs[:, organ + 1:organ + 2].float()
                 gt = val_labels[:, organ + 1:organ + 2].float()
@@ -279,6 +307,11 @@ def evaluate_checkpoint(
                 if pred_present[organ]:
                     hd95[organ] = hd95_metric(y_pred=pred, y=gt, spacing=VOXEL_SPACING)[0, 0].item()
                     nsd[organ] = nsd_metric(y_pred=pred, y=gt, spacing=VOXEL_SPACING)[0, 0].item()
+                    pred_np, gt_np = pred[0, 0].numpy() > 0, gt[0, 0].numpy() > 0
+                    to_gt, to_pred = directed_hd95(pred_np, gt_np, VOXEL_SPACING)
+                    superior, inferior = craniocaudal_overextent(pred_np, gt_np, VOXEL_SPACING[2])
+                    for key, value in zip(DIAGNOSTICS, (to_gt, to_pred, superior, inferior)):
+                        diag[key][organ] = value
                 else:
                     # Organ present but never predicted: penalised, not left out of the means
                     hd95[organ] = max_distance
@@ -289,13 +322,15 @@ def evaluate_checkpoint(
             dice_rows.append(dice)
             hd95_rows.append(hd95)
             nsd_rows.append(nsd)
+            volumes.append(per_volume_record(names[idx], dice, hd95, nsd, diag, miss))
 
             del labels, val_outputs, val_labels
             if device.type == "cuda":
                 torch.cuda.empty_cache()
 
     return {
-        "dice": np.stack(dice_rows), "hd95": np.stack(hd95_rows), "nsd": np.stack(nsd_rows), "missed": missed
+        "dice": np.stack(dice_rows), "hd95": np.stack(hd95_rows), "nsd": np.stack(nsd_rows), "missed": missed,
+        "volumes": volumes,
     }
 
 
@@ -313,6 +348,7 @@ def summarize_run(result: dict) -> dict:
         "mean_hd95": float(np.nanmean(hd95_per_organ)),
         "mean_nsd": float(np.nanmean(nsd_per_organ)),
         "missed": result["missed"],
+        "volumes": result.get("volumes", []),
     }
 
 
@@ -395,6 +431,7 @@ def main():
             "hd95_per_organ": to_list(summary["hd95_per_organ"]),
             "nsd_per_organ": to_list(summary["nsd_per_organ"]),
             "missed_per_organ": summary["missed"].tolist(),
+            "per_volume": summary["volumes"],
         }
     # --- Cross-validation mode ---
     else:
@@ -464,6 +501,7 @@ def main():
                 }
                 for fold, s in zip(folds, summaries)
             ],
+            "per_volume": [{"fold": fold, **v} for fold, s in zip(folds, summaries) for v in s["volumes"]],
         }
 
     output.parent.mkdir(parents=True, exist_ok=True)

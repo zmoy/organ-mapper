@@ -179,6 +179,18 @@ Ils tournent aussi automatiquement sur GitHub Actions à chaque push sur `main` 
 
 **Rapport des résultats :** `results/REPORT.md` rassemble toutes les évaluations (`results/evaluation_*.json`) dans des tableaux triés par Dice, avec le détail par organe du meilleur résultat. Il se régénère avec `python scripts/report.py` après chaque nouvelle évaluation.
 
+**Comparer deux réglages :** chaque évaluation enregistre aussi les scores de chaque volume (`per_volume`). `compare.py` apparie les volumes communs à deux évaluations et donne, pour le Dice, le HD95 et le NSD, la différence moyenne, son intervalle de confiance à 95 % (bootstrap) et la p-valeur d'un test de Wilcoxon apparié. C'est plus fiable qu'un écart de moyennes de fold : sur 6 volumes, l'écart-type entre patients dépasse souvent l'effet mesuré.
+
+```bash
+python scripts/compare.py results/evaluation_cv_classes_w5_aug_pp_best.json results/evaluation_cv_classes_w5_aug_panc_fold1_best.json --organs
+```
+
+**Origine du HD95 :** `analyze_errors.py` sépare, pour chaque organe, les voxels prédits loin de l'annotation (faux positifs, organe trop étendu) des parties d'organe non prédites, mesure le débordement en hauteur au-dessus et en dessous des coupes annotées, puis liste les pires cas avec les commandes pour les afficher.
+
+```bash
+python scripts/analyze_errors.py results/evaluation_cv_classes_w5_aug_pp_best.json
+```
+
 **4. Lancement de l'inférence :**
 Génère les volumes .nii.gz prédits (par défaut sur toutes les images de `imagesTs`) à partir du checkpoint de votre choix.
 

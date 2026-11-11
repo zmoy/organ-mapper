@@ -31,6 +31,7 @@ from monai.inferers import sliding_window_inference
 
 import src.training.callbacks as callbacks_module
 from src.checkpoints import find_fold_checkpoints, load_model
+from src.comparison import paired_comparison, per_volume_scores
 from src.data.dataset import get_kfold_splits
 from src.data.transforms import (
     NUM_CLASSES,
@@ -42,6 +43,7 @@ from src.data.transforms import (
     get_train_transforms,
     swap_lateral_labels,
 )
+from src.error_analysis import craniocaudal_overextent, directed_hd95
 from src.inference import MIRROR_AXES, predict_volume
 from src.models.builder import get_model
 from src.postprocess import VOXEL_SPACING as POSTPROCESS_SPACING
@@ -489,6 +491,69 @@ def test_ensemble_averages_the_models_probabilities():
 def test_unknown_sliding_window_mode_raises():
     with pytest.raises(ValueError):
         predict_volume(torch.nn.Identity(), torch.zeros(1, 1, 8, 8, 8), (8, 8, 8), torch.device("cpu"), mode="x")
+
+
+# --- HD95 diagnostics and paired comparison ---
+
+def test_directed_hd95_splits_the_symmetric_hd95():
+    from monai.metrics import HausdorffDistanceMetric
+    gt = np.zeros((40, 40, 40), dtype=bool)
+    gt[10:20, 10:20, 10:20] = True
+    pred = gt.copy()
+    pred[30:34, 30:34, 30:34] = True  # a false positive region far from the organ
+    spacing = (1.5, 1.5, 2.0)
+    to_label, to_pred = directed_hd95(pred, gt, spacing)
+    assert to_label > 10 and to_pred < 1e-6  # the error is on the prediction side only
+    symmetric = HausdorffDistanceMetric(percentile=95)(
+        torch.from_numpy(pred)[None, None].float(), torch.from_numpy(gt)[None, None].float(), spacing=spacing
+    )
+    assert abs(max(to_label, to_pred) - symmetric.item()) < 1e-4
+
+
+def test_craniocaudal_overextent():
+    gt = np.zeros((10, 10, 30), dtype=bool)
+    gt[4:6, 4:6, 10:20] = True  # annotated slices 10..19
+    pred = np.zeros_like(gt)
+    pred[4:6, 4:6, 12:25] = True  # stops 2 slices early below, goes 5 slices above
+    assert craniocaudal_overextent(pred, gt, slice_thickness=2.0) == (10.0, -4.0)
+
+
+def _per_volume(values: dict[str, list]) -> dict:
+    return {"per_volume": [{"name": n, "dice": v, "hd95": v, "nsd": v} for n, v in values.items()]}
+
+
+def test_paired_comparison_detects_a_consistent_gain():
+    a = {f"img{i:04d}": [0.5 + 0.01 * i, None] + [0.6] * 11 for i in range(10)}
+    b = {n: [v[0] + 0.05, None] + [0.6] * 11 for n, v in a.items()}
+    b["img0099"] = [0.9] * 13  # not in A: ignored
+    sa, sb = per_volume_scores(_per_volume(a), "dice"), per_volume_scores(_per_volume(b), "dice")
+
+    organ1 = paired_comparison(sa, sb, organ=1)
+    assert organ1.n == 10 and abs(organ1.diff - 0.05) < 1e-9
+    assert organ1.ci_low > 0 and organ1.p_value < 0.01
+    assert paired_comparison(sa, sb, organ=2) is None  # organ never defined
+    overall = paired_comparison(sa, sb)
+    assert overall.n == 10 and abs(overall.diff - 0.05 / 12) < 1e-9  # mean over the 12 defined organs
+    same = paired_comparison(sa, sa)
+    assert same.diff == 0 and same.p_value == 1.0
+
+
+def test_per_volume_scores_needs_the_per_volume_results():
+    with pytest.raises(KeyError):
+        per_volume_scores({"mean_dice": 0.7}, "dice")
+
+
+def test_per_volume_record_is_json_ready():
+    evaluate = _load_script("evaluate")
+    nan13 = np.full(13, np.nan)
+    diag = {key: nan13.copy() for key in evaluate.DIAGNOSTICS}
+    diag["hd95_pred_to_label"][0] = 3.5
+    dice = nan13.copy()
+    dice[0] = 0.9
+    record = evaluate.per_volume_record("img0001", dice, nan13, nan13, diag, np.zeros(13, dtype=bool))
+    import json
+    assert json.loads(json.dumps(record))["hd95_pred_to_label"][:2] == [3.5, None]
+    assert record["dice"][0] == 0.9 and record["missed"] == [0] * 13
 
 
 # --- Report of the evaluation results ---
