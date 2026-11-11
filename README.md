@@ -6,13 +6,52 @@
 ![MONAI](https://img.shields.io/badge/MONAI-Medical_AI-blue?style=for-the-badge)
 [![tests](https://github.com/zmoy/organ-mapper/actions/workflows/tests.yml/badge.svg)](https://github.com/zmoy/organ-mapper/actions/workflows/tests.yml)
 
+## 🇬🇧 English summary
+
+3D segmentation of **13 abdominal organs** in CT scans (30 annotated volumes), built with MONAI and PyTorch Lightning and trained end to end on a **4 GB GPU**. The detailed documentation below is in French.
+
+![Ground truth vs prediction on a validation volume](./assets/img0039_unet_cv.png)
+
+> *Validation volume img0039, predicted by the fold 2 model, which never saw it during training. Columns: CT, ground truth, prediction. This is the best of the 30 volumes (Dice 0.81); the median volume scores 0.73.*
+
+**Results** (5-fold cross-validation, whole volumes, mean over the 13 organs):
+
+| Model | Dice | HD95 (mm) | NSD (2 mm) |
+| :--- | :--- | :--- | :--- |
+| U-Net baseline (hold-out, 6 volumes) | 0.439 | 336.5 | 0.315 |
+| **U-Net, current configuration** | **0.719 ± 0.022** | **19.3 ± 4.6** | **0.630 ± 0.021** |
+
+What made the difference, one change at a time: per-class patch sampling, a Dice + cross-entropy loss weighted ×5 on the small organs, strong augmentations, largest connected component post-processing, and Gaussian-weighted sliding-window inference with 75 % overlap.
+
+**Engineering**
+* **4 GB of VRAM:** mixed precision, 96³ patches, patch-based validation during training, a disk cache of the deterministic preprocessing, and full-volume predictions stitched on the CPU.
+* **Reliable runs:** resumable training (Ctrl+C, `--resume`, finished folds skipped) and a disk-space guard that stops cleanly at the end of an epoch.
+* **CI (GitHub Actions):** `ruff` lint, fast tests without data or GPU, and a check that the generated results report (`results/REPORT.md`) is up to date.
+
+**Evaluation**
+* Dice, HD95 in mm and NSD, computed on whole volumes. A missed organ counts as the worst possible value.
+* Paired comparison of two settings on the same volumes (`scripts/compare.py`: bootstrap confidence interval and Wilcoxon test). A change is kept only if it holds up, because six volumes per fold cannot separate settings a few points apart.
+* Error analysis (`scripts/analyze_errors.py`): the largest distance errors come from parts of organs the model misses, not from false positives far away. For example, the ascending aorta, annotated at the top of 10 scans, is never predicted.
+
+**Negative results, kept on purpose**
+* Swin UNETR (62 M parameters) reached about 8 % Dice without pre-training in this low-data regime, against 44 % for the U-Net baseline.
+* Flip test-time augmentation collapses a model trained without flips. Training with random flips (and left/right label swaps) underfits in 250 epochs.
+* Up-weighting the pancreas did not help, and neither did keeping secondary connected components.
+
+**Limitations:**
+* Settings were tuned on fold 1.
+* There is no independent annotated test set.
+* nnU-Net reports about 0.83 Dice on comparable abdominal benchmarks, under a different protocol. The gap has not been measured on these folds yet.
+
+---
+
 ## 📌 Contexte Clinique
 La segmentation automatique des organes sur des scanners 3D (CT scans) est un enjeu majeur en imagerie médicale. Elle permet de :
 * **Planifier la radiothérapie** en protégeant les organes sains (Organ-At-Risk).
 * **Préparer les interventions chirurgicales** en offrant une cartographie 3D précise au chirurgien.
 * **Accélérer le flux de travail** des radiologues en automatisant le détourage manuel.
 
-Ce projet vise à développer un pipeline MLOps complet capable de segmenter simultanément **14 organes de l'abdomen** à partir de volumes CT bruts, en comparant une approche classique (U-Net) avec l'état de l'art des Vision Transformers (Swin UNETR).
+Ce projet vise à développer un pipeline MLOps complet capable de segmenter simultanément **13 organes de l'abdomen** (14 classes avec le fond) à partir de volumes CT bruts, en comparant une approche classique (U-Net) avec l'état de l'art des Vision Transformers (Swin UNETR).
 
 ---
 
@@ -128,7 +167,12 @@ Le **U-Net**, grâce à la nature de ses convolutions, comprend nativement la co
 ## 👁️ Visualisation des Inférences
 Le script d'inférence intègre la transformation `Invertd` de MONAI pour replacer les prédictions 3D exactement dans l'espace physique original du patient (512x512).
 
-### Surcouche Anatomique (Coupe Axiale)
+### Annotation et prédiction (configuration actuelle)
+> *Volume de validation img0039, prédit par le modèle du fold 2, qui ne l'a jamais vu à l'entraînement. C'est le meilleur des 30 volumes (Dice 0.81) ; le volume médian obtient 0.73. Figure générée par `scripts/visualize.py`.*
+
+![Annotation et prédiction](./assets/img0039_unet_cv.png)
+
+### Surcouche Anatomique (Coupe Axiale, baseline)
 > *À gauche : Le scanner CT brut. À droite : La prédiction 3D du U-Net Baseline superposée.*
 
 ![Visualisation Inférence](./assets/matplotlib.png)
