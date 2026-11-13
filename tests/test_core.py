@@ -14,6 +14,7 @@ Run with:
 
 import argparse
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -49,6 +50,8 @@ from src.data.transforms import (
     swap_lateral_labels,
 )
 from src.error_analysis import craniocaudal_overextent, directed_hd95
+from src.export import export_run
+from src.export import sha256 as export_sha256
 from src.inference import MIRROR_AXES, predict_volume
 from src.models.builder import get_model
 from src.postprocess import VOXEL_SPACING as POSTPROCESS_SPACING
@@ -439,6 +442,68 @@ def test_load_model_keeps_only_the_network_weights(tmp_path):
     assert not loaded.training
     for key, value in net.state_dict().items():
         assert torch.equal(loaded.state_dict()[key], value)
+
+
+# --- Export of the fold models ---
+
+def _fake_run(tmp_path: Path, folds=(1, 2)) -> tuple[Path, Path, dict]:
+    """Run directory with one Lightning-like checkpoint per fold, and its evaluation JSON."""
+    run, nets, names = tmp_path / "run", {}, []
+    for fold in folds:
+        torch.manual_seed(fold)
+        nets[fold] = get_model("unet")
+        state = {f"model.{k}": v for k, v in nets[fold].state_dict().items()}
+        state["loss_function.class_weight"] = torch.ones(14)
+        (run / f"fold_{fold}").mkdir(parents=True)
+        name = f"run_fold_{fold}-epoch{10 + fold}-dice0.70.ckpt"
+        torch.save({"state_dict": state, "epoch": 10 + fold}, run / f"fold_{fold}" / name)
+        names.append(name)
+    evaluation = {
+        "model": "unet", "postprocess": True, "checkpoint_kind": "best", "nsd_tolerance_mm": 2.0,
+        "inference": {"overlap": 0.75, "mode": "gaussian", "tta": False},
+        "folds": list(folds), "checkpoints": [f"run/fold_{f}/{n}" for f, n in zip(folds, names)],
+        "mean_dice": {"mean": 0.7, "std": 0.02},
+        "dice_per_organ": {"mean": [0.5] * 13},
+        "per_fold": [{"fold": f, "mean_dice": 0.7, "mean_hd95": 20.0, "mean_nsd": 0.6} for f in folds],
+        "per_volume": [{"name": f"img{f:04d}", "fold": f} for f in folds],
+    }
+    path = tmp_path / "evaluation.json"
+    path.write_text(json.dumps(evaluation), encoding="utf-8")
+    return run, path, nets
+
+
+def test_export_writes_weights_only_files_that_load_like_the_checkpoints(tmp_path):
+    run, evaluation, nets = _fake_run(tmp_path)
+    manifest = export_run(run, evaluation, tmp_path / "out")
+
+    exported = find_fold_checkpoints(tmp_path / "out")
+    assert [p.name for p in exported] == ["organ_mapper_unet_fold_1.pt", "organ_mapper_unet_fold_2.pt"]
+    for fold, path in zip((1, 2), exported):
+        weights = torch.load(path, weights_only=True)  # plain tensors: no pickled code
+        assert weights.keys() == nets[fold].state_dict().keys()  # the network only, no loss buffer
+        loaded = load_model(path, "unet", torch.device("cpu"))
+        for key, value in nets[fold].state_dict().items():
+            assert torch.equal(loaded.state_dict()[key], value)
+
+    on_disk = json.loads((tmp_path / "out" / "manifest.json").read_text(encoding="utf-8"))
+    assert on_disk == manifest
+    assert manifest["preprocessing"]["spacing_mm"] == list(SPACING)
+    assert manifest["classes"]["13"] == "left adrenal" and len(manifest["classes"]) == NUM_CLASSES
+    assert manifest["inference"]["mode"] == "gaussian"
+    fold_1 = manifest["folds"][0]
+    assert fold_1["epoch"] == 11 and fold_1["validation_volumes"] == ["img0001"]
+    assert fold_1["sha256"] == export_sha256(tmp_path / "out" / fold_1["file"])
+
+
+def test_export_refuses_checkpoints_the_evaluation_did_not_score(tmp_path):
+    run, evaluation, _ = _fake_run(tmp_path)
+    with pytest.raises(ValueError):
+        export_run(run, evaluation, tmp_path / "out", kind="last")
+    data = json.loads(evaluation.read_text(encoding="utf-8"))
+    data["checkpoints"] = ["other.ckpt", "other2.ckpt"]
+    evaluation.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError):
+        export_run(run, evaluation, tmp_path / "out")
 
 
 # --- Inference: sliding window and test-time augmentation ---

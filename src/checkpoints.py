@@ -1,16 +1,40 @@
 """
-Checkpoint lookup and loading for inference, shared by scripts/evaluate.py and
-scripts/predict.py.
+Checkpoint lookup and loading for inference, shared by scripts/evaluate.py,
+scripts/predict.py and scripts/export_models.py.
 
-Only the network weights (the "model.*" keys of the Lightning state_dict) are loaded:
-the checkpoints also hold the class weights of the loss.
+Two formats:
+    - Lightning checkpoints (.ckpt, written by train.py / train_cv.py): only the network
+      weights (the "model.*" keys of the state_dict) are loaded, since the checkpoints also
+      hold the class weights of the loss and the optimizer state;
+    - exported weights (.pt, written by scripts/export_models.py): the network state_dict
+      alone, loaded with torch.load(weights_only=True), which runs no pickled code.
+A run directory holds either one fold_k/ subfolder per fold (training) or flat files
+named *fold_k.pt (export).
 """
 
+import re
 from pathlib import Path
 
 import torch
 
 from src.models.builder import get_model
+
+EXPORT_PATTERN = re.compile(r"fold_(\d+)\.pt$")  # exported weights: <name>_fold_<k>.pt
+
+
+def extract_weights(checkpoint: Path) -> dict[str, torch.Tensor]:
+    """
+    Network weights of a Lightning checkpoint.
+
+    Args:
+        checkpoint: .ckpt written by train.py / train_cv.py (a file of this project: it is
+            unpickled with weights_only=False).
+
+    Returns:
+        The state_dict of the network ("model." prefix removed).
+    """
+    state = torch.load(checkpoint, map_location="cpu", weights_only=False)["state_dict"]
+    return {k[len("model."):]: v for k, v in state.items() if k.startswith("model.")}
 
 
 def find_fold_checkpoint(checkpoints_dir: Path, fold: int, kind: str = "best") -> Path:
@@ -23,8 +47,14 @@ def find_fold_checkpoint(checkpoints_dir: Path, fold: int, kind: str = "best") -
         kind: "best" (best-Dice checkpoint) or "last" (last.ckpt, end of the training).
 
     Returns:
-        Path of the checkpoint.
+        Path of the checkpoint (or of the exported weights, see the module docstring).
     """
+    if not (checkpoints_dir / f"fold_{fold}").is_dir():
+        exported = [p for p in checkpoints_dir.glob("*.pt") if _exported_fold(p) == fold]
+        if len(exported) == 1:
+            return exported[0]
+        if len(exported) > 1:
+            raise FileNotFoundError(f"Several exported weights for fold {fold} in {checkpoints_dir}")
     if kind == "last":
         last = checkpoints_dir / f"fold_{fold}" / "last.ckpt"
         if not last.exists():
@@ -56,9 +86,17 @@ def find_fold_checkpoints(checkpoints_dir: Path, kind: str = "best") -> list[Pat
         int(p.name.split("_")[1]) for p in checkpoints_dir.glob("fold_*")
         if p.is_dir() and p.name.split("_")[1].isdigit()
     )
+    if not folds:  # exported weights: flat *fold_k.pt files
+        folds = sorted({f for p in checkpoints_dir.glob("*.pt") if (f := _exported_fold(p)) is not None})
     if not folds:
-        raise FileNotFoundError(f"No fold_k/ folder in {checkpoints_dir}")
+        raise FileNotFoundError(f"No fold_k/ folder nor *fold_k.pt file in {checkpoints_dir}")
     return [find_fold_checkpoint(checkpoints_dir, fold, kind) for fold in folds]
+
+
+def _exported_fold(path: Path) -> int | None:
+    """Fold number of an exported weights file (<name>_fold_<k>.pt), None for other files."""
+    match = EXPORT_PATTERN.search(path.name)
+    return int(match.group(1)) if match else None
 
 
 def load_model(
@@ -68,18 +106,22 @@ def load_model(
     spatial_size: tuple[int, int, int] = (96, 96, 96),
 ) -> torch.nn.Module:
     """
-    Network of a Lightning checkpoint, in eval mode on `device`.
+    Network of a Lightning checkpoint or of exported weights, in eval mode on `device`.
 
     Args:
-        checkpoint: .ckpt written by train.py / train_cv.py.
+        checkpoint: .ckpt written by train.py / train_cv.py, or .pt written by
+            scripts/export_models.py.
         model_name: Architecture, see src.models.builder.get_model.
         device: Device of the returned network.
         spatial_size: Patch size (needed by the transformer models).
 
     Returns:
-        The network with the "model.*" weights of the checkpoint.
+        The network with the weights of the checkpoint.
     """
     model = get_model(model_name=model_name, spatial_size=spatial_size)
-    state = torch.load(checkpoint, map_location="cpu", weights_only=False)["state_dict"]
-    model.load_state_dict({k[len("model."):]: v for k, v in state.items() if k.startswith("model.")})
+    if Path(checkpoint).suffix == ".pt":
+        weights = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    else:
+        weights = extract_weights(checkpoint)
+    model.load_state_dict(weights)  # strict: a wrong architecture fails here
     return model.to(device).eval()

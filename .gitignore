@@ -17,6 +17,9 @@ checkpoints/
 # Predictions folder for testing model's results
 predictions/
 
+# Exported model weights (published as release assets, not in git)
+exports/
+
 # Claude Code files
 CLAUDE.md
 CLAUDE.local.md

@@ -33,6 +33,8 @@ What made the difference, one change at a time: per-class patch sampling, a Dice
 * Paired comparison of two settings on the same volumes (`scripts/compare.py`: bootstrap confidence interval and Wilcoxon test). A change is kept only if it holds up, because six volumes per fold cannot separate settings a few points apart.
 * Error analysis (`scripts/analyze_errors.py`): the largest distance errors come from parts of organs the model misses, not from false positives far away. For example, the ascending aorta, annotated at the top of 10 scans, is never predicted.
 
+**Trained models:** the five fold models are published as weights-only files in the [GitHub releases](https://github.com/zmoy/organ-mapper/releases), with a manifest. Data, protocol, scores and limitations are described in [MODEL_CARD.md](MODEL_CARD.md).
+
 **Negative results, kept on purpose**
 * Swin UNETR (62 M parameters) reached about 8 % Dice without pre-training in this low-data regime, against 44 % for the U-Net baseline.
 * Flip test-time augmentation collapses a model trained without flips. Training with random flips (and left/right label swaps) underfits in 250 epochs.
@@ -257,6 +259,24 @@ python scripts/predict.py --ensemble-dir checkpoints/cv_classes_w5_aug --postpro
 ```
 
 L'ensemble ne peut pas être évalué en validation croisée : chaque volume de validation a servi à entraîner les 4 autres modèles. C'est la pratique standard (nnU-Net), avec un gain habituel de l'ordre d'un point de Dice, mais ce gain n'est pas mesuré ici.
+
+**Modèles publiés :** les 5 modèles de la validation croisée sont disponibles dans les [releases GitHub](https://github.com/zmoy/organ-mapper/releases).
+- Chaque fichier ne contient que les poids du réseau (19 Mo, contre 58 Mo pour un checkpoint d'entraînement). Il se charge avec `torch.load(weights_only=True)`, qui n'exécute aucun code.
+- Un `manifest.json` accompagne les poids : prétraitement, réglages d'inférence, scores par fold, volumes de validation et empreintes SHA-256.
+- La fiche du modèle, [MODEL_CARD.md](MODEL_CARD.md), décrit les données, le protocole, les scores par organe et les limites.
+
+Il suffit de placer les fichiers dans `exports/cv_classes_w5_aug/`, puis d'utiliser les mêmes commandes :
+
+```bash
+python scripts/predict.py --checkpoint exports/cv_classes_w5_aug/organ_mapper_unet_fold_2.pt --postprocess
+python scripts/predict.py --ensemble-dir exports/cv_classes_w5_aug --postprocess
+```
+
+Ces fichiers sont générés à partir des checkpoints par `export_models.py`, qui vérifie que ce sont bien ceux qui ont été évalués :
+
+```bash
+python scripts/export_models.py --checkpoints-dir checkpoints/cv_classes_w5_aug --evaluation results/evaluation_cv_classes_w5_aug_pp_best.json
+```
 
 **5. Visualisation d'une prédiction :**
 Figure scanner / annotation / prédiction sur deux coupes axiales et une coupe coronale, en convention radiologique, avec le Dice de chaque organe. L'annotation est facultative (images de `imagesTs`).
