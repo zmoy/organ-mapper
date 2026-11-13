@@ -28,6 +28,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from monai.inferers import sliding_window_inference
+from monai.transforms import Compose
 
 import src.training.callbacks as callbacks_module
 from src.checkpoints import find_fold_checkpoints, load_model
@@ -36,11 +37,15 @@ from src.data.dataset import get_kfold_splits
 from src.data.transforms import (
     NUM_CLASSES,
     RARE_CLASSES,
+    SPACING,
     RandFlipLateralSwapd,
     get_augmentations,
     get_class_ratios,
     get_flips,
+    get_inference_transforms,
+    get_preprocessing,
     get_train_transforms,
+    get_val_transforms,
     swap_lateral_labels,
 )
 from src.error_analysis import craniocaudal_overextent, directed_hd95
@@ -139,7 +144,47 @@ def test_max_distance_uses_the_voxel_spacing():
 
 
 def test_postprocess_and_evaluation_share_the_voxel_spacing():
-    assert POSTPROCESS_SPACING == _load_script("evaluate").VOXEL_SPACING
+    assert POSTPROCESS_SPACING == _load_script("evaluate").VOXEL_SPACING == SPACING
+
+
+# --- Shared pre-processing ---
+
+def _write_synthetic_ct(tmp_path: Path) -> dict:
+    """Small CT (LPS orientation, 0.8 x 0.8 x 3 mm) and its integer label map, as NIfTI files."""
+    rng = np.random.default_rng(0)
+    image = rng.uniform(-1000, 1000, size=(24, 20, 10)).astype(np.float32)
+    label = np.zeros((24, 20, 10), dtype=np.uint8)
+    label[4:12, 5:15, 2:8] = 6
+    label[14:20, 5:10, 3:6] = 2
+    affine = np.diag([-0.8, -0.8, 3.0, 1.0])  # not RAS and not the training spacing
+    paths = {"image": tmp_path / "img.nii.gz", "label": tmp_path / "label.nii.gz"}
+    nib.save(nib.Nifti1Image(image, affine), paths["image"])
+    nib.save(nib.Nifti1Image(label, affine), paths["label"])
+    return {key: str(path) for key, path in paths.items()}
+
+
+def test_inference_preprocessing_matches_training(tmp_path):
+    files = _write_synthetic_ct(tmp_path)
+    inference = get_inference_transforms()({"image": files["image"]})["image"]
+    evaluation = get_val_transforms(full_volume=True)(files)
+    training_prefix = Compose(get_preprocessing(("image", "label")))(files)
+
+    for reference in (evaluation, training_prefix):
+        assert torch.equal(inference, reference["image"])
+        assert np.allclose(inference.affine, reference["image"].affine)
+    # RAS orientation, training spacing, HU window mapped to [0, 1]
+    assert np.allclose(np.abs(np.diag(inference.affine)[:3]), SPACING)
+    assert np.all(np.diag(inference.affine)[:3] > 0)
+    assert inference.min() >= 0.0 and inference.max() <= 1.0
+    # The label is resampled with nearest-neighbour interpolation: no new values
+    assert set(torch.unique(evaluation["label"]).tolist()) <= {0.0, 2.0, 6.0}
+
+
+def test_get_preprocessing_rejects_unknown_keys():
+    with pytest.raises(ValueError):
+        get_preprocessing(("label",))
+    with pytest.raises(ValueError):
+        get_preprocessing(("image", "mask"))
 
 
 def test_prediction_cache_round_trip_and_refuses_other_settings(tmp_path):

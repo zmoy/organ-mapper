@@ -30,12 +30,11 @@ from matplotlib.patches import Patch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
 
-from src.data.transforms import NUM_CLASSES, ORGAN_NAMES
+from src.data.transforms import HU_WINDOW, NUM_CLASSES, ORGAN_NAMES  # same window as the training
 
 # One clearly distinct colour per organ (none close to grey, so that each stays visible on the CT)
 COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2",
           "#ffd700", "#00e5ff", "#ff00ff", "#7cfc00", "#ff1493", "#00bfa0"]
-HU_WINDOW = (-175.0, 250.0)  # same window as the training (src/data/transforms.py)
 
 
 def parse_args() -> argparse.Namespace:

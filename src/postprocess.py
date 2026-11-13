@@ -6,8 +6,8 @@ scripts/predict.py so that the inference applies the same rules as the evaluatio
 import numpy as np
 from scipy import ndimage
 
-# Voxel size (mm) of the resampled volumes the post-processing runs on (see src/data/transforms.py)
-VOXEL_SPACING = (1.5, 1.5, 2.0)
+# Voxel size (mm) of the resampled volumes the post-processing runs on
+from src.data.transforms import SPACING as VOXEL_SPACING
 
 
 def _component_distances_mm(

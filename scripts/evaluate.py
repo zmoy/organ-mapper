@@ -48,14 +48,14 @@ sys.path.append(str(PROJECT_ROOT))
 
 from src.checkpoints import find_fold_checkpoint, load_model
 from src.data.dataset import get_data_dicts, get_dataset, get_kfold_splits, split_train_val
-from src.data.transforms import LATERAL_PAIRS, get_val_transforms
+from src.data.transforms import LATERAL_PAIRS, SPACING, get_val_transforms
 from src.error_analysis import craniocaudal_overextent, directed_hd95
 from src.inference import add_inference_args, inference_settings, predict_volume
 from src.postprocess import keep_largest_components as keep_largest_components_np
 
 SPATIAL_SIZE = (96, 96, 96)
-# Voxel size (mm) of the resampled volumes (default of get_val_transforms), so that HD95 is in mm
-VOXEL_SPACING = (1.5, 1.5, 2.0)
+# Voxel size (mm) of the resampled volumes (shared pre-processing), so that HD95 is in mm
+VOXEL_SPACING = SPACING
 NUM_CLASSES = 14
 
 

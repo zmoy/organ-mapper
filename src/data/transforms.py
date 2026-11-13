@@ -42,6 +42,63 @@ RARE_CLASSES = (4, 5, 10, 12, 13)
 LATERAL_PAIRS = ((2, 3), (12, 13))
 LATERAL_AXIS = 0
 
+# Deterministic pre-processing, shared by training, validation, evaluation and inference
+# (get_preprocessing). VOXEL_SPACING in scripts/evaluate.py and src/postprocess.py must equal SPACING.
+ORIENTATION = "RAS"
+SPACING = (1.5, 1.5, 2.0)        # mm (X, Y, Z)
+HU_WINDOW = (-175.0, 250.0)      # soft tissue window, mapped to [0, 1]
+
+
+def get_preprocessing(
+    keys: tuple[str, ...] = ("image", "label"),
+    spacing: tuple[float, float, float] = SPACING,
+) -> list:
+    """
+    Deterministic pre-processing: load, channel first, RAS orientation, resampling and HU windowing.
+
+    The single definition used by the training, validation and inference pipelines, so that the
+    model always sees the same input space.
+
+    Args:
+        keys: "image" first, then optionally "label" (resampled with nearest-neighbour interpolation).
+        spacing: Target voxel size in mm (X, Y, Z).
+
+    Returns:
+        A list of MONAI dictionary transforms.
+    """
+    keys = list(keys)
+    if keys[0] != "image" or not set(keys) <= {"image", "label"}:
+        raise ValueError(f"keys must be ('image',) or ('image', 'label'), got {tuple(keys)}")
+    mode = ("bilinear", "nearest")[:len(keys)]
+    return [
+        LoadImaged(keys=keys),
+        EnsureChannelFirstd(keys=keys),
+        Orientationd(keys=keys, axcodes=ORIENTATION),
+        Spacingd(keys=keys, pixdim=spacing, mode=mode if len(mode) > 1 else mode[0]),
+        ScaleIntensityRanged(
+            keys=["image"],
+            a_min=HU_WINDOW[0], a_max=HU_WINDOW[1],
+            b_min=0.0, b_max=1.0,
+            clip=True
+        ),
+    ]
+
+
+def get_inference_transforms(spacing: tuple[float, float, float] = SPACING) -> Compose:
+    """
+    Pre-processing of an unlabelled image for inference (scripts/predict.py).
+
+    Same steps as the training pipeline (get_preprocessing), image only; Invertd uses this
+    pipeline to bring the prediction back to the patient space.
+
+    Args:
+        spacing: Target voxel size in mm (X, Y, Z).
+
+    Returns:
+        Compose: The composed MONAI transforms pipeline.
+    """
+    return Compose(get_preprocessing(("image",), spacing))
+
 
 def swap_lateral_labels(label: torch.Tensor, pairs: tuple[tuple[int, int], ...] = LATERAL_PAIRS) -> torch.Tensor:
     """
@@ -142,7 +199,7 @@ def get_class_ratios(
 
 def get_train_transforms(
     spatial_size: tuple[int, int, int] = (96, 96, 96),
-    spacing: tuple[float, float, float] = (1.5, 1.5, 2.0),
+    spacing: tuple[float, float, float] = SPACING,
     num_samples: int = 1,
     intensity_shift: bool = True,
     sampling: str = "posneg",
@@ -220,31 +277,13 @@ def get_train_transforms(
         raise ValueError(f"Unknown sampling '{sampling}'. Choose 'posneg' or 'classes'.")
 
     transforms = Compose([
-        # --- 1. Load and Standardize ---
-        LoadImaged(keys=["image", "label"]),
-        EnsureChannelFirstd(keys=["image", "label"]),
-        Orientationd(keys=["image", "label"], axcodes="RAS"),
+        # --- 1. Load, standardize, resample and window (shared with validation and inference) ---
+        *get_preprocessing(("image", "label"), spacing),
 
-        # Resample physical spacing
-        Spacingd(
-            keys=["image", "label"], 
-            pixdim=spacing, 
-            mode=("bilinear", "nearest")
-        ),
-        
-        # --- 2. Intensity Normalization ---
-        # Soft tissue windowing
-        ScaleIntensityRanged(
-            keys=["image"],
-            a_min=-175.0, a_max=250.0,
-            b_min=0.0, b_max=1.0,
-            clip=True
-        ),
-        
-        # --- 3. Patch Extraction ---
+        # --- 2. Patch Extraction ---
         *crop,
 
-        # --- 4. Data Augmentation (on the patches) ---
+        # --- 3. Data Augmentation (on the patches) ---
         *augmentations,
     ])
 
@@ -315,7 +354,7 @@ def get_augmentations(
     raise ValueError(f"Unknown augmentation level '{level}'. Choose 'light' or 'strong'.")
 
 def get_val_transforms(
-    spacing: tuple[float, float, float] = (1.5, 1.5, 2.0),
+    spacing: tuple[float, float, float] = SPACING,
     spatial_size: tuple[int, int, int] = (96, 96, 96),
     full_volume: bool = False
 ) -> Compose:
@@ -335,22 +374,7 @@ def get_val_transforms(
     Returns:
         Compose: The composed MONAI transforms pipeline.
     """
-    transforms = [
-        LoadImaged(keys=["image", "label"]),
-        EnsureChannelFirstd(keys=["image", "label"]),
-        Orientationd(keys=["image", "label"], axcodes="RAS"),
-        Spacingd(
-            keys=["image", "label"], 
-            pixdim=spacing, 
-            mode=("bilinear", "nearest")
-        ),
-        ScaleIntensityRanged(
-            keys=["image"],
-            a_min=-175.0, a_max=250.0,
-            b_min=0.0, b_max=1.0,
-            clip=True
-        ),
-    ]
+    transforms = get_preprocessing(("image", "label"), spacing)
 
     if not full_volume:
         # Deterministic single patch: crop to the organs' bounding box, then

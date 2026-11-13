@@ -28,22 +28,17 @@ from monai.data import DataLoader, Dataset, decollate_batch
 from monai.transforms import (
     AsDiscreted,
     Compose,
-    EnsureChannelFirstd,
     EnsureTyped,
     Invertd,
-    LoadImaged,
     MapTransform,
-    Orientationd,
     SaveImaged,
-    ScaleIntensityRanged,
-    Spacingd,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
 
 from src.checkpoints import find_fold_checkpoints, load_model
-from src.data.transforms import LATERAL_PAIRS
+from src.data.transforms import LATERAL_PAIRS, get_inference_transforms
 from src.inference import add_inference_args, inference_settings, predict_volume
 from src.postprocess import keep_largest_components
 
@@ -127,14 +122,8 @@ def main():
 
     # --- 3. Pipelines MONAI (Le secret est ici) ---
 
-    # A. Pré-traitement (Aller vers l'espace du modèle). Must match src/data/transforms.py exactly.
-    inference_transforms = Compose([
-        LoadImaged(keys=["image"]),
-        EnsureChannelFirstd(keys=["image"]),
-        Orientationd(keys=["image"], axcodes="RAS"),
-        Spacingd(keys=["image"], pixdim=(1.5, 1.5, 2.0), mode="bilinear"),
-        ScaleIntensityRanged(keys=["image"], a_min=-175.0, a_max=250.0, b_min=0.0, b_max=1.0, clip=True)
-    ])
+    # A. Pré-traitement (Aller vers l'espace du modèle) : the same steps as training
+    inference_transforms = get_inference_transforms()
 
     # B. Post-traitement (Retourner vers l'espace original du patient)
     post_steps = [
